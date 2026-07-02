@@ -112,7 +112,7 @@ func Install(tools []model.MiseTool, out io.Writer, report Reporter) ([]Installe
 		return nil, nil
 	}
 	if !Available() {
-		return nil, fmt.Errorf("mise.tool needs mise — install it: https://mise.jdx.dev")
+		return nil, fmt.Errorf("mise.tool needs mise — install it with `curl https://mise.run | sh` (https://mise.jdx.dev)")
 	}
 
 	refs := make([]string, len(tools))

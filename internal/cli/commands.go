@@ -269,7 +269,7 @@ func runSync(e *Env, args []string) int {
 	}
 	var miseBinDirs []string
 	if len(plan.MiseTools) > 0 && !mise.Available() {
-		addErr("mise is required to install tools but is not installed — https://mise.jdx.dev")
+		addErr("mise is required to install tools but is not installed — install it with `curl https://mise.run | sh` (see https://mise.jdx.dev; the mise binary on PATH is all tau needs)")
 	} else {
 		// Effective versions (locked unless --update / spec changed).
 		effMise := make([]model.MiseTool, len(plan.MiseTools))
