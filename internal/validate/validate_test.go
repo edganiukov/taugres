@@ -73,3 +73,33 @@ func hasErrContaining(r *Report, sub string) bool {
 	}
 	return false
 }
+
+func TestPipUvMixWarning(t *testing.T) {
+	// Both -> warning, not an error.
+	p := model.NewPlan()
+	p.PipPackages = []model.PipPackage{{Name: "requests"}}
+	p.UvPackages = []model.UvPackage{{Name: "ruff"}}
+	r := Validate(p)
+	if r.HasErrors() {
+		t.Errorf("mixing pip+uv should warn, not error: %v", r.Errors)
+	}
+	if !hasWarnContaining(r, "pip.install and uv.install") {
+		t.Errorf("expected pip/uv mix warning, got %v", r.Warnings)
+	}
+
+	// Only one -> no warning.
+	p2 := model.NewPlan()
+	p2.UvPackages = []model.UvPackage{{Name: "ruff"}}
+	if r2 := Validate(p2); len(r2.Warnings) != 0 {
+		t.Errorf("uv alone should not warn, got %v", r2.Warnings)
+	}
+}
+
+func hasWarnContaining(r *Report, sub string) bool {
+	for _, w := range r.Warnings {
+		if strings.Contains(w, sub) {
+			return true
+		}
+	}
+	return false
+}

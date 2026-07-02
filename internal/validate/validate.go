@@ -145,6 +145,14 @@ func Validate(p *model.Plan) *Report {
 		}
 	}
 
+	// pip and uv both create Python venvs (.taugres/tools/pip and
+	// .taugres/tools/uv), each with its own `python`; mixing them splits packages
+	// across two disjoint environments. Steer toward one.
+	if len(p.PipPackages) > 0 && len(p.UvPackages) > 0 {
+		r.Warnings = append(r.Warnings,
+			"both pip.install and uv.install are used: they create separate venvs with separate `python`s, so packages are split across two environments — prefer one")
+	}
+
 	return r
 }
 
