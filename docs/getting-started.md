@@ -163,8 +163,16 @@ both the requested spec and the resolved version, so editing a version in the
 config automatically re-resolves that entry.
 
 - `tau sync` — reproducible: install locked versions.
-- `tau sync --update` — re-resolve **unpinned** tools/packages to their latest
-  and rewrite the lock. (Pinned entries are controlled by editing the config.)
+- `tau sync --update` — re-resolve **all unpinned** tools/packages to their
+  latest and rewrite the lock. (Pinned entries are controlled by editing the
+  config.)
+- `tau update <name>...` — re-resolve just the named unpinned entries to their
+  latest, leaving everything else at its locked version, and report `old -> new`.
+  The manager is inferred from where you declared the tool; qualify as
+  `<manager>:name` (`pip:ruff`, `uv:ruff`, `mise:node`, `npm:typescript`) to
+  disambiguate a package declared under two managers. Updating a pinned entry is
+  refused (edit its version in the config instead); `tau update` with no names is
+  equivalent to `tau sync --update`.
 
 ### Removing tools (GC)
 
@@ -181,6 +189,7 @@ tools live in mise's shared store, so only their lock entry is dropped.
 | `tau init [--nested]` | create `workspace.tg` (or `project.tg`) |
 | `tau check` | evaluate + validate config, report warnings/errors |
 | `tau sync [--verbose] [--update]` | evaluate config, install tools, generate shell scripts (requires trust) |
+| `tau update [name...]` | re-resolve unpinned tools/packages to latest (all, or just those named; `<manager>:name` to disambiguate) |
 | `tau status` | show active project, sync state, and trust |
 | `tau hook <shell>` | print the shell hook (bash, zsh, fish) |
 | `tau activate <shell>` | print the activation script for a trusted project |
@@ -233,4 +242,3 @@ For nested projects `//` still points at the repository root (nearest
 - frozen/lockfile-based dependency installs (npm ci, uv sync --frozen, …) and
   hashing the ecosystem lockfiles
 - remote (`https://`) Starlark imports
-```

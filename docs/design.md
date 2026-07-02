@@ -421,9 +421,16 @@ Resolution rules per entry:
 - **default** — if the lock has an entry whose requested spec still matches the
   config, install the locked resolved version (reproducible). Editing the
   config's version re-resolves that entry automatically.
-- **`tau sync --update`** — re-resolve **unpinned** entries (no version in
+- **`tau sync --update`** — re-resolve **all unpinned** entries (no version in
   config) to latest and rewrite the lock; pinned entries are controlled by
   editing the config.
+- **`tau update <name>...`** — scope the re-resolve to specific unpinned
+  entries. It drops those entries from the lock and runs a normal sync, so only
+  the named ones re-resolve to latest while everything else stays locked; a
+  name pinned in the config is refused. The manager is inferred from the config;
+  a `<manager>:name` prefix (`mise`/`pip`/`npm`/`uv`) disambiguates a name
+  declared under two managers, while a non-manager prefix (a mise backend like
+  `go:goose`) is treated as a bare name. With no names it is `sync --update`.
 
 Determinism is at the **version + package-manager-lockfile level**, not
 Nix-style bit-for-bit. Artifact hashing is deliberately avoided: it is
@@ -485,6 +492,7 @@ tau init [--nested]        # create workspace.tg (or project.tg)
 tau check                  # evaluate + validate config
 tau sync [--update]        # install tools/packages and generate scripts (needs trust)
 tau sync --verbose         # print every step and tool output
+tau update [name...]       # re-resolve unpinned tools/packages to latest (all, or just those named)
 tau status                 # active project, sync state, tools, trust
 tau allow                  # trust the active project (once)
 tau deny                   # revoke trust
@@ -504,8 +512,7 @@ tau version
   lock (portable, tamper-evident) and cache-first fetching.
 - **`tau doctor`** — host requirement checks (mise/python/node presence).
 - **Golden tests** for generated scripts.
-- **Per-tool `tau update <tool>`**; a strict mode (record mise/manager versions,
-  require managers via mise).
+- A strict mode (record mise/manager versions, require managers via mise).
 - **Opt-in nested inheritance** with explicit conflict rules.
 - Direct `github_release`/archive providers and a Taugres registry remain
   intentionally out of scope.

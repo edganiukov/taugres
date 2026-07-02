@@ -26,4 +26,4 @@ uv.install("ruff@0.6.9")
 
 # Node packages install into a project-local prefix (.taugres/tools/npm); their
 # CLIs run directly (like npx). Implies mise node.
-npm.install("cowsay@1.6.0")
+npm.install("cowsay")

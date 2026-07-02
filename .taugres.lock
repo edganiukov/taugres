@@ -20,7 +20,7 @@
   },
   "npm": {
     "cowsay": {
-      "requested": "1.6.0",
+      "requested": "",
       "resolved": "1.6.0"
     }
   },

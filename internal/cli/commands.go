@@ -726,6 +726,182 @@ func splitLines(s string) []string {
 	return out
 }
 
+// --- update ---
+
+// updManagers are the tool-manager qualifiers accepted as a "<manager>:name"
+// prefix by `tau update`, in lock-section order.
+var updManagers = []string{"mise", "pip", "npm", "uv"}
+
+// splitManager splits an optional "<manager>:" qualifier off an update
+// argument. Only mise/pip/npm/uv count as qualifiers; any other leading segment
+// is left intact, so a mise backend spec like "go:goose" is treated as a bare
+// name (and a backend-prefixed mise tool can still be qualified explicitly, as
+// "mise:go:goose").
+func splitManager(arg string) (manager, name string) {
+	if i := strings.IndexByte(arg, ':'); i > 0 && slices.Contains(updManagers, arg[:i]) {
+		return arg[:i], arg[i+1:]
+	}
+	return "", arg
+}
+
+// sectionOf returns the lock section for a manager qualifier.
+func sectionOf(lk *lock.File, manager string) map[string]lock.Entry {
+	switch manager {
+	case "mise":
+		return lk.Mise
+	case "pip":
+		return lk.Pip
+	case "npm":
+		return lk.Npm
+	case "uv":
+		return lk.Uv
+	}
+	return nil
+}
+
+// updTarget locates a named tool/package: the manager it belongs to and whether
+// the config pins its version (in which case updating is a no-op that should be
+// steered to editing the config instead).
+type updTarget struct {
+	manager string
+	pinned  bool
+}
+
+// targets returns the managers a name is declared under. With manager == "" it
+// searches all; otherwise it is restricted to that one. A name may match more
+// than one manager (e.g. the same package under both pip and uv).
+func targets(p *model.Plan, manager, name string) []updTarget {
+	var out []updTarget
+	want := func(m string) bool { return manager == "" || manager == m }
+	if want("mise") {
+		for _, t := range p.MiseTools {
+			if t.Name == name {
+				out = append(out, updTarget{"mise", t.Version != ""})
+				break
+			}
+		}
+	}
+	if want("pip") {
+		for _, x := range p.PipPackages {
+			if x.Name == name {
+				out = append(out, updTarget{"pip", x.Version != ""})
+				break
+			}
+		}
+	}
+	if want("npm") {
+		for _, x := range p.NpmPackages {
+			if x.Name == name {
+				out = append(out, updTarget{"npm", x.Version != ""})
+				break
+			}
+		}
+	}
+	if want("uv") {
+		for _, x := range p.UvPackages {
+			if x.Name == name {
+				out = append(out, updTarget{"uv", x.Version != ""})
+				break
+			}
+		}
+	}
+	return out
+}
+
+// runUpdate re-resolves specific unpinned tools/packages to their latest
+// versions, leaving everything else at its locked version. It works by dropping
+// the named entries from the lock and running a normal sync, which re-resolves
+// only the now-missing entries. Names may be qualified as "<manager>:name"
+// (mise/pip/npm/uv) to disambiguate a package declared under two managers. With
+// no names it updates everything unpinned (equivalent to `tau sync --update`).
+func runUpdate(e *Env, args []string) int {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	fs.SetOutput(e.Stderr)
+	verbose := fs.Bool("verbose", false, "print every step and tool output")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	names := fs.Args()
+
+	syncArgs := []string{}
+	if *verbose {
+		syncArgs = append(syncArgs, "--verbose")
+	}
+	// No names: update everything unpinned.
+	if len(names) == 0 {
+		return runSync(e, append(syncArgs, "--update"))
+	}
+
+	er, code := discoverAndEval(e)
+	if er == nil {
+		return code
+	}
+	lk, err := lock.Load(er.disc.ProjectRoot)
+	if err != nil {
+		return fail(e, "reading %s: %v", lock.FileName, err)
+	}
+
+	type cleared struct{ manager, name, old string }
+	var updated []cleared
+	for _, arg := range names {
+		manager, name := splitManager(arg)
+		ts := targets(er.res.Plan, manager, name)
+		if len(ts) == 0 {
+			if manager != "" {
+				return fail(e, "update %s: %s is not a %s-managed tool or package", arg, name, manager)
+			}
+			return fail(e, "update %s: not a declared tool or package", arg)
+		}
+		for _, t := range ts {
+			if t.pinned {
+				fmt.Fprintf(e.Stdout, "tau: %s (%s) is pinned in the config — change its version there\n", name, t.manager)
+				continue
+			}
+			sec := sectionOf(lk, t.manager)
+			old := ""
+			if entry, ok := sec[name]; ok {
+				old = entry.Resolved
+				delete(sec, name)
+			}
+			updated = append(updated, cleared{t.manager, name, old})
+		}
+	}
+	if len(updated) == 0 {
+		fmt.Fprintln(e.Stdout, "tau: nothing to update")
+		return 0
+	}
+	if err := lk.Save(er.disc.ProjectRoot); err != nil {
+		return fail(e, "writing %s: %v", lock.FileName, err)
+	}
+
+	labels := make([]string, len(updated))
+	for i, u := range updated {
+		labels[i] = u.name
+	}
+	fmt.Fprintf(e.Stdout, "tau: updating %s\n", strings.Join(labels, ", "))
+	if code := runSync(e, syncArgs); code != 0 {
+		return code
+	}
+
+	// Report old -> new from the freshly-written lock, per manager.
+	if nlk, err := lock.Load(er.disc.ProjectRoot); err == nil {
+		for _, u := range updated {
+			now := sectionOf(nlk, u.manager)[u.name].Resolved
+			if u.old != now {
+				fmt.Fprintf(e.Stdout, "tau: %s (%s) %s -> %s\n", u.name, u.manager, orNone(u.old), orNone(now))
+			}
+		}
+	}
+	return 0
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
+}
+
 // --- status ---
 
 func runStatus(e *Env, args []string) int {

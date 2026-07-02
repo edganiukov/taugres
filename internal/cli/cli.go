@@ -50,6 +50,8 @@ func dispatch(e *Env, cmd string, rest []string) int {
 		return runCheck(e, rest)
 	case "sync":
 		return runSync(e, rest)
+	case "update":
+		return runUpdate(e, rest)
 	case "status":
 		return runStatus(e, rest)
 	case "hook":
@@ -84,6 +86,7 @@ Usage:
   tau init [--nested]        create workspace.tg (or project.tg)
   tau check                  evaluate and validate the active config
   tau sync [--update]        install tools and generate shell scripts
+  tau update [name...]       re-resolve unpinned tools/packages to latest (all, or just those named)
   tau status                 show active project, sync state, and tools
   tau allow                  trust the active project (once)
   tau deny                   revoke trust for the active project

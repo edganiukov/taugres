@@ -116,6 +116,62 @@ func TestManualSyncPrintsDoneLine(t *testing.T) {
 	}
 }
 
+func TestUpdateUnknownName(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nmise.tool(\"go@1.26.2\")\n")
+
+	code, _, errOut := run(t, dir, "update", "nope")
+	if code == 0 {
+		t.Fatal("update of an undeclared tool should fail")
+	}
+	if !strings.Contains(errOut, "not a declared") {
+		t.Errorf("unexpected error: %s", errOut)
+	}
+}
+
+func TestUpdatePinnedIsNoOp(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nmise.tool(\"go@1.26.2\")\n")
+
+	// A pinned tool is steered to the config; no sync runs, so mise is not needed.
+	code, out, _ := run(t, dir, "update", "go")
+	if code != 0 {
+		t.Fatalf("update exit %d", code)
+	}
+	if !strings.Contains(out, "pinned in the config") || !strings.Contains(out, "nothing to update") {
+		t.Errorf("unexpected output:\n%s", out)
+	}
+}
+
+func TestUpdateManagerQualifier(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	// Same name under two managers; both pinned so no sync (mise) is needed —
+	// the pinned-skip path exercises which manager(s) a qualifier selects.
+	testutil.WriteFile(t, dir, "workspace.tg",
+		"project(\"x\")\npip.install(\"ruff@1.0\")\nuv.install(\"ruff@2.0\")\n")
+
+	// Qualified: only the uv entry is considered.
+	_, out, _ := run(t, dir, "update", "uv:ruff")
+	if !strings.Contains(out, "ruff (uv) is pinned") || strings.Contains(out, "(pip)") {
+		t.Errorf("uv:ruff should touch only uv, got:\n%s", out)
+	}
+
+	// Unqualified: both managers match.
+	_, out, _ = run(t, dir, "update", "ruff")
+	if !strings.Contains(out, "(pip)") || !strings.Contains(out, "(uv)") {
+		t.Errorf("bare ruff should match both managers, got:\n%s", out)
+	}
+
+	// Wrong manager for the name.
+	code, _, errOut := run(t, dir, "update", "npm:ruff")
+	if code == 0 || !strings.Contains(errOut, "not a npm-managed") {
+		t.Errorf("npm:ruff should be rejected, got code %d err %q", code, errOut)
+	}
+}
+
 func TestSyncIfStaleSkipsWhenFresh(t *testing.T) {
 	isolate(t)
 	dir := testutil.TempWorkspace(t)
