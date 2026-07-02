@@ -160,6 +160,10 @@ function _tau_hook --on-variable PWD
             # below rather than trust activate's mtime, whose 1s granularity can
             # miss a same-second resync.
             set -e _TAU_ACT_TOKEN
+            # If the sync produced the env, clear the retry guard so a later
+            # teardown (e.g. rm -rf .taugres) syncs again. If not (genuine
+            # failure), keep it so the same inputs are not retried every prompt.
+            test -f "$activate"; and set -e _TAU_TRIED
         end
     end
 

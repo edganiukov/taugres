@@ -174,6 +174,10 @@ _tau_hook() {
       # rather than trust activate's mtime, whose 1s granularity can miss a
       # same-second resync.
       unset _TAU_ACT_TOKEN
+      # If the sync produced the env, clear the retry guard so a later teardown
+      # (e.g. rm -rf .taugres) syncs again. If it did not (genuine failure),
+      # keep the guard so the same inputs are not retried every prompt.
+      [ -f "$activate" ] && unset _TAU_TRIED
     fi
   fi
 
