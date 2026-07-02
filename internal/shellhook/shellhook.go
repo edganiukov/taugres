@@ -148,15 +148,17 @@ _tau_hook() {
     local newest m
     newest="$(_tau_mtime "$(_tau_config_file "$proj")")"
     [ -n "$newest" ] || newest=0
-    while IFS= read -r line; do
-      case "$line" in
-        input:*)
-          p=${line#input:}; p=${p#*:}
-          [ -n "$p" ] || continue
-          m="$(_tau_mtime "$p")"
-          [ -n "$m" ] && [ "$m" -gt "$newest" ] && newest="$m" ;;
-      esac
-    done < "$manifest"
+    if [ -f "$manifest" ]; then
+      while IFS= read -r line; do
+        case "$line" in
+          input:*)
+            p=${line#input:}; p=${p#*:}
+            [ -n "$p" ] || continue
+            m="$(_tau_mtime "$p")"
+            [ -n "$m" ] && [ "$m" -gt "$newest" ] && newest="$m" ;;
+        esac
+      done < "$manifest"
+    fi
     local _tau_tok="$proj|$present|$newest|$probesig"
     if [ "$_tau_tok" != "${_TAU_TRIED:-}" ]; then
       _TAU_TRIED="$_tau_tok"

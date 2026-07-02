@@ -186,7 +186,7 @@ func TestInlineContentFunctionRendered(t *testing.T) {
 		{Name: "foobar", Shells: []string{"bash"}, Content: "echo foobar"},
 	}
 	out, _ := Activate(p, "bash")
-	if !strings.Contains(out, "foobar() {\necho foobar\n  }") {
+	if !strings.Contains(out, "foobar() {\necho foobar\n}") {
 		t.Errorf("inline content not embedded as function body:\n%s", out)
 	}
 	if strings.Contains(out, "source") {

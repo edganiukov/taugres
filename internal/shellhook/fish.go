@@ -130,17 +130,19 @@ function _tau_hook --on-variable PWD
         # probe signal is folded in so a genuine probe flip forces one resync.
         set -l newest (_tau_mtime (_tau_config_file "$proj"))
         test -n "$newest"; or set newest 0
-        while read -l line
-            switch "$line"
-                case 'input:*'
-                    set -l p (string replace -r '^input:[^:]*:' '' -- $line)
-                    test -n "$p"; or continue
-                    set -l m (_tau_mtime "$p")
-                    if test -n "$m"; and test "$m" -gt "$newest"
-                        set newest $m
-                    end
-            end
-        end <"$manifest"
+        if test -f "$manifest"
+            while read -l line
+                switch "$line"
+                    case 'input:*'
+                        set -l p (string replace -r '^input:[^:]*:' '' -- $line)
+                        test -n "$p"; or continue
+                        set -l m (_tau_mtime "$p")
+                        if test -n "$m"; and test "$m" -gt "$newest"
+                            set newest $m
+                        end
+                end
+            end <"$manifest"
+        end
         set -l _tau_tok "$proj|$present|$newest|$probesig"
         if test "$_tau_tok" != "$_TAU_TRIED"
             set -g _TAU_TRIED "$_tau_tok"

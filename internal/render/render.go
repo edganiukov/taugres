@@ -217,14 +217,12 @@ func renderAliases(w *strings.Builder, p *model.Plan) {
 	for _, name := range sortedKeys(p.Aliases) {
 		guard := helperPrefix + "ALIAS_" + sanitizeVar(name)
 		qn := shellQuoteBare(name)
-		// Conservative collision handling: don't overwrite existing aliases,
-		// functions, or commands.
-		fmt.Fprintf(w, "if alias %s >/dev/null 2>&1 || command -v %s >/dev/null 2>&1; then\n", qn, qn)
-		fmt.Fprintf(w, "  printf 'tau: not overriding existing %s\\n' %s >&2\n", "%s", qn)
-		fmt.Fprintln(w, "else")
-		fmt.Fprintf(w, "  alias %s=%s\n", qn, shellQuote(p.Aliases[name]))
-		fmt.Fprintf(w, "  %s=1\n", guard)
-		fmt.Fprintln(w, "fi")
+		// The project's aliases win: always (re)define them, shadowing any
+		// existing alias or command for the duration of activation. Deactivation
+		// removes them again (unalias restores a shadowed command). Re-defining is
+		// also what lets reactivation refresh a stale definition.
+		fmt.Fprintf(w, "alias %s=%s\n", qn, shellQuote(p.Aliases[name]))
+		fmt.Fprintf(w, "%s=1\n", guard)
 	}
 	fmt.Fprintln(w)
 }
@@ -241,20 +239,18 @@ func renderFunctions(w *strings.Builder, p *model.Plan, shell string) {
 			continue
 		}
 		guard := helperPrefix + "FN_" + sanitizeVar(name)
-		qn := shellQuoteBare(name)
-		fmt.Fprintf(w, "if command -v %s >/dev/null 2>&1 && ! alias %s >/dev/null 2>&1; then\n", qn, qn)
-		fmt.Fprintf(w, "  printf 'tau: not overriding existing %s\\n' %s >&2\n", "%s", qn)
-		fmt.Fprintln(w, "else")
+		// The project's functions win: always (re)define them (shadowing any
+		// existing command), so reactivation refreshes a stale definition.
+		// Deactivation removes them again.
 		if e.File != "" {
 			// Body lives in a file, sourced with the caller's arguments.
-			fmt.Fprintf(w, "  %s() { source %s \"$@\"; }\n", name, shellQuote(e.File))
+			fmt.Fprintf(w, "%s() { source %s \"$@\"; }\n", name, shellQuote(e.File))
 		} else {
 			// Inline body embedded verbatim (shell ignores indentation), with
 			// surrounding blank lines trimmed.
-			fmt.Fprintf(w, "  %s() {\n%s\n  }\n", name, strings.Trim(e.Content, "\n"))
+			fmt.Fprintf(w, "%s() {\n%s\n}\n", name, strings.Trim(e.Content, "\n"))
 		}
-		fmt.Fprintf(w, "  %s=1\n", guard)
-		fmt.Fprintln(w, "fi")
+		fmt.Fprintf(w, "%s=1\n", guard)
 	}
 	fmt.Fprintln(w)
 }

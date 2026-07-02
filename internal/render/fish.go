@@ -141,12 +141,10 @@ func fishAliases(w *strings.Builder, p *model.Plan) {
 	for _, name := range sortedKeys(p.Aliases) {
 		guard := helperPrefix + "ALIAS_" + sanitizeVar(name)
 		qn := fishQuote(name)
-		fmt.Fprintf(w, "if type -q %s\n", qn)
-		fmt.Fprintf(w, "    printf 'tau: not overriding existing %%s\\n' %s >&2\n", qn)
-		fmt.Fprintln(w, "else")
-		fmt.Fprintf(w, "    alias %s %s\n", qn, fishQuote(p.Aliases[name]))
-		fmt.Fprintf(w, "    set -g %s 1\n", guard)
-		fmt.Fprintln(w, "end")
+		// The project's aliases win: always (re)define them; deactivation removes
+		// them. Re-defining is what lets reactivation refresh a stale definition.
+		fmt.Fprintf(w, "alias %s %s\n", qn, fishQuote(p.Aliases[name]))
+		fmt.Fprintf(w, "set -g %s 1\n", guard)
 	}
 	fmt.Fprintln(w)
 }
@@ -163,17 +161,14 @@ func fishFunctions(w *strings.Builder, p *model.Plan) {
 			continue
 		}
 		guard := helperPrefix + "FN_" + sanitizeVar(name)
-		qn := fishQuote(name)
-		fmt.Fprintf(w, "if type -q %s\n", qn)
-		fmt.Fprintf(w, "    printf 'tau: not overriding existing %%s\\n' %s >&2\n", qn)
-		fmt.Fprintln(w, "else")
+		// The project's functions win: always (re)define them; deactivation
+		// removes them. Re-defining lets reactivation refresh a stale definition.
 		if e.File != "" {
-			fmt.Fprintf(w, "    function %s; source %s $argv; end\n", name, fishQuote(e.File))
+			fmt.Fprintf(w, "function %s; source %s $argv; end\n", name, fishQuote(e.File))
 		} else {
-			fmt.Fprintf(w, "    function %s\n%s\n    end\n", name, strings.Trim(e.Content, "\n"))
+			fmt.Fprintf(w, "function %s\n%s\nend\n", name, strings.Trim(e.Content, "\n"))
 		}
-		fmt.Fprintf(w, "    set -g %s 1\n", guard)
-		fmt.Fprintln(w, "end")
+		fmt.Fprintf(w, "set -g %s 1\n", guard)
 	}
 	fmt.Fprintln(w)
 }
