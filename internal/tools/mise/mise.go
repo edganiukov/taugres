@@ -15,8 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go.gnkv.dev/taugres/internal/model"
-	"go.gnkv.dev/taugres/internal/tools/toolenv"
+	"github.com/edganiukov/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/tools/toolenv"
 )
 
 // Binary is the mise executable name; overridable in tests.

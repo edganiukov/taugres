@@ -14,7 +14,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"go.gnkv.dev/taugres/internal/ui"
+	"github.com/edganiukov/taugres/internal/ui"
 )
 
 // Run executes cmd, streaming its combined output to out (when non-nil) while

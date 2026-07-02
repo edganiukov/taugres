@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 func TestRootOnlyWorkspace(t *testing.T) {

@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"go.gnkv.dev/taugres/internal/cli"
+	"github.com/edganiukov/taugres/internal/cli"
 )
 
 func main() {

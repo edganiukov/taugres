@@ -15,8 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go.gnkv.dev/taugres/internal/model"
-	"go.gnkv.dev/taugres/internal/tools/toolenv"
+	"github.com/edganiukov/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/tools/toolenv"
 )
 
 // outputPrefix labels uv's own output so its origin is clear.

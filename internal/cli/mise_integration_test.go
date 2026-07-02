@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 // writeFakeMise installs a stub `mise` on PATH that understands `install` and

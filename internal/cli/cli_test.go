@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 // run executes a tau command in wd and returns exit code, stdout, stderr.

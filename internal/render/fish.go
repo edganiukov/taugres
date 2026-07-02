@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go.gnkv.dev/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/model"
 )
 
 // fishActivate renders the fish activation script.

@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"go.gnkv.dev/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/model"
 )
 
 // helperPrefix namespaces the shell variables used to save prior state.

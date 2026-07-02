@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"go.gnkv.dev/taugres/internal/model"
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 // fakeMise installs a stub mise whose `install` echoes two lines and whose

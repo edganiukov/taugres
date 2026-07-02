@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 func TestAllowIsAllowedDeny(t *testing.T) {

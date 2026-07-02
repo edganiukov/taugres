@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"go.gnkv.dev/taugres/internal/model"
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 func TestInvalidEnvName(t *testing.T) {

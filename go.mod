@@ -1,4 +1,4 @@
-module go.gnkv.dev/taugres
+module github.com/edganiukov/taugres
 
 go 1.26.4
 

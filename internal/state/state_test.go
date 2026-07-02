@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 func TestManifestRoundTrip(t *testing.T) {

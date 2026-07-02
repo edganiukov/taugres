@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"go.gnkv.dev/taugres/internal/model"
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 // fakeToolchain returns a bin dir containing a stub `npm` that, on install,

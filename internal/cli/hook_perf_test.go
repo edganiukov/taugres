@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"go.gnkv.dev/taugres/internal/shellhook"
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/shellhook"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 // TestHookTransitionPerformance times the transition cycle

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"go.gnkv.dev/taugres/internal/discover"
-	"go.gnkv.dev/taugres/internal/model"
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/discover"
+	"github.com/edganiukov/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 func evalWorkspace(t *testing.T, dir string) *Result {

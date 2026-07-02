@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"go.gnkv.dev/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 var (
@@ -33,7 +33,7 @@ func builtTau(t *testing.T) string {
 			return
 		}
 		bin := filepath.Join(dir, "tau")
-		out, err := exec.Command("go", "build", "-o", bin, "go.gnkv.dev/taugres/cmd/tau").CombinedOutput()
+		out, err := exec.Command("go", "build", "-o", bin, "github.com/edganiukov/taugres/cmd/tau").CombinedOutput()
 		if err != nil {
 			tauBinErr = fmt.Errorf("build failed: %v\n%s", err, out)
 			return

@@ -15,9 +15,9 @@ import (
 	"go.starlark.net/starlarkstruct"
 	"go.starlark.net/syntax"
 
-	"go.gnkv.dev/taugres/internal/discover"
-	"go.gnkv.dev/taugres/internal/model"
-	"go.gnkv.dev/taugres/internal/paths"
+	"github.com/edganiukov/taugres/internal/discover"
+	"github.com/edganiukov/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/paths"
 )
 
 // Result is the output of evaluating a config, including the modules that were
