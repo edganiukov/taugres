@@ -273,7 +273,6 @@ func runSync(e *Env, args []string) int {
 	// network. --update re-resolves unpinned entries, so it forces every manager.
 	// Fresh() is true for an empty set, so these read as plain "is it stale?".
 	force := *update
-	miseStale := force || !mise.Fresh(plan.MiseTools, lk.Mise)
 	pipStale := force || !pip.Fresh(plan.PipPackages, plan.PipDir, lk.Pip)
 	npmStale := force || !npm.Fresh(plan.NpmPackages, plan.NpmDir, lk.Npm)
 	uvStale := force || !uv.Fresh(plan.UvPackages, plan.UvDir, lk.Uv)
@@ -282,14 +281,23 @@ func runSync(e *Env, args []string) int {
 	miseReinstalled := false
 	var wg sync.WaitGroup
 
+	// mise is fresh when every declared tool is already installed at its locked
+	// version (resolved offline via `mise where`); then its store bin dirs are
+	// reused for PATH and the install is skipped.
+	var miseDirs []string
+	miseFresh := false
+	if !force && len(plan.MiseTools) > 0 && mise.Available() {
+		miseDirs, miseFresh = mise.InstalledDirs(plan.MiseTools, lk.Mise)
+	}
+
 	switch {
 	case len(plan.MiseTools) > 0 && !mise.Available():
 		addErr("mise is required to install tools but is not installed — install it with `curl https://mise.run | sh` (see https://mise.jdx.dev; the mise binary on PATH is all tau needs)")
-	case !miseStale:
-		// Present and unchanged: skip mise entirely, reuse the cached store bin
-		// dirs for PATH (and as the toolchain for pip/uv/npm).
-		miseBinDirs = mise.CachedBinDirs(plan.MiseTools, lk.Mise)
-		toolchainBinDirs = miseBinDirs
+	case miseFresh:
+		// Present and unchanged: skip mise entirely, reuse the store bin dirs for
+		// PATH (and as the toolchain for pip/uv/npm).
+		miseBinDirs = miseDirs
+		toolchainBinDirs = miseDirs
 	default:
 		miseReinstalled = true
 		// Effective versions (locked unless --update / spec changed).
@@ -300,13 +308,12 @@ func runSync(e *Env, args []string) int {
 			effMise[i] = model.MiseTool{Name: t.Name, Version: lock.InstallVersion(t.Version, e, ok, *update)}
 			reqByName[t.Name] = t.Version
 		}
-		// recordMise writes lock entries (including the resolved bin dir, for the
-		// offline freshness check) and returns the tools' bin dirs. Each caller
-		// touches only its own tools' entries, so concurrent calls are safe.
+		// recordMise writes lock entries and returns the tools' bin dirs. Each
+		// caller touches only its own tools' entries, so concurrent calls are safe.
 		recordMise := func(installed []mise.Installed) []string {
 			var dirs []string
 			for _, ins := range installed {
-				lk.Mise[ins.Name] = lock.Entry{Requested: reqByName[ins.Name], Resolved: ins.Resolved, BinDir: ins.BinDir}
+				lk.Mise[ins.Name] = lock.Entry{Requested: reqByName[ins.Name], Resolved: ins.Resolved}
 				dirs = append(dirs, ins.BinDir)
 			}
 			return dirs

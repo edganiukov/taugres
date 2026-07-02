@@ -17,17 +17,13 @@ const FileName = ".taugres.lock"
 // version is the current lockfile schema version.
 const version = 1
 
-// Entry pins one tool/package.
+// Entry pins one tool/package. It is deliberately machine-independent (no
+// absolute paths) so the committed lockfile stays reproducible across machines.
 type Entry struct {
 	// Requested is the spec from the config (e.g. "22", "" for unpinned).
 	Requested string `json:"requested"`
 	// Resolved is the concrete installed version (e.g. "22.11.0").
 	Resolved string `json:"resolved"`
-	// BinDir caches mise's resolved store bin directory for this tool, so the
-	// per-tool staleness check can confirm the install is present without
-	// shelling out to `mise where`. Empty for pip/npm/uv (their bin dirs are
-	// deterministic project-local paths).
-	BinDir string `json:"binDir,omitempty"`
 }
 
 // File is the parsed lockfile.

@@ -110,31 +110,27 @@ type Installed struct {
 	BinDir   string // directory holding its executables (for PATH)
 }
 
-// Fresh reports whether every tool is already installed at the version pinned in
-// the lock — its recorded spec matches the config, it resolved to a concrete
-// version, and its cached store bin dir still exists — so Install (and its
-// network access) can be skipped. Caching the bin dir in the lock is what lets
-// this stay offline: no `mise where` or `mise install` is run.
-func Fresh(tools []model.MiseTool, locked map[string]lock.Entry) bool {
+// InstalledDirs returns each tool's store bin dir, in tool order, if every tool
+// is already installed at its locked version — its recorded spec matches the
+// config, it resolved to a concrete version, and that version is present in the
+// mise store. ok is false otherwise, meaning Install must run.
+//
+// Presence is resolved with `mise where` (offline, no network), so nothing
+// machine-specific is cached in the committed lock. This runs during a sync
+// (gating the network install), never on the shell hook's hot path.
+func InstalledDirs(tools []model.MiseTool, locked map[string]lock.Entry) (dirs []string, ok bool) {
 	for _, t := range tools {
-		e, ok := locked[t.Name]
-		if !ok || e.Requested != t.Version || e.Resolved == "" || e.BinDir == "" || !toolenv.IsDir(e.BinDir) {
-			return false
+		e, present := locked[t.Name]
+		if !present || e.Requested != t.Version || e.Resolved == "" {
+			return nil, false
 		}
-	}
-	return true
-}
-
-// CachedBinDirs returns the store bin dirs recorded in the lock, in tool order.
-// It builds the activation PATH when Install is skipped because Fresh is true.
-func CachedBinDirs(tools []model.MiseTool, locked map[string]lock.Entry) []string {
-	var dirs []string
-	for _, t := range tools {
-		if e, ok := locked[t.Name]; ok && e.BinDir != "" {
-			dirs = append(dirs, e.BinDir)
+		dir, err := where(model.MiseTool{Name: t.Name, Version: e.Resolved})
+		if err != nil {
+			return nil, false // recorded but not actually installed
 		}
+		dirs = append(dirs, binDir(dir, t.Name))
 	}
-	return dirs
+	return dirs, true
 }
 
 // Install installs the given tools (each MiseTool.Version is the exact spec to

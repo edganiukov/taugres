@@ -3,8 +3,7 @@
   "mise": {
     "go": {
       "requested": "1.26.4",
-      "resolved": "1.26.4",
-      "binDir": "/home/ed/.local/share/mise/installs/go/1.26.4/bin"
+      "resolved": "1.26.4"
     }
   }
 }
