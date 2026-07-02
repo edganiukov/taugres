@@ -1,0 +1,29 @@
+{
+  "lockfileVersion": 1,
+  "mise": {
+    "go": {
+      "requested": "1.26.2",
+      "resolved": "1.26.2"
+    },
+    "node": {
+      "requested": "",
+      "resolved": "26.4.0"
+    },
+    "python": {
+      "requested": "",
+      "resolved": "3.14.6"
+    }
+  },
+  "pip": {
+    "ruff": {
+      "requested": "0.6.9",
+      "resolved": "0.6.9"
+    }
+  },
+  "npm": {
+    "cowsay": {
+      "requested": "1.6.0",
+      "resolved": "1.6.0"
+    }
+  }
+}

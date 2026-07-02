@@ -1,0 +1,7 @@
+module go.gnkv.dev/taugres
+
+go 1.26.4
+
+require go.starlark.net v0.0.0-20260630144053-529d8e869a14
+
+require golang.org/x/sys v0.42.0
