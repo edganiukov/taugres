@@ -3,17 +3,17 @@ project("taugres")
 
 # Environment variables. Values expand $VAR / ${VAR} against earlier env()
 # entries and the process environment.
-shell.env("FOOBAR", "postgres://localhost/app")
+shell.env("FOO", "BAR")
 
 # Paths are repository-root anchored with // (or absolute). Expose your own
 # scripts explicitly:
 # shell.path.prepend("//bin")
 
 # Aliases.
-shell.alias("l", "ls -l")
+# shell.alias("l", "ls")
 
 # Shell functions: inline content, or a file via file="//bin/fn.sh".
-shell.fn("hi", shells = ["bash", "zsh"], content = "echo hello $1")
+# shell.fn("hi", shells = ["bash", "zsh"], content = "echo hello $1")
 
 # Tools/packages install via mise (a hard dependency) and are added to PATH on
 # activation. Versions are pinned in .taugres.lock; `tau sync --update` refreshes
@@ -22,8 +22,8 @@ mise.tool("go@1.26.2")
 
 # Python packages install into a project-local venv (.taugres/tools/pip); its
 # bin is prepended to PATH. Implies mise python.
-uv.install("ruff@0.6.9")
+# uv.install("ruff@0.6.9")
 
 # Node packages install into a project-local prefix (.taugres/tools/npm); their
 # CLIs run directly (like npx). Implies mise node.
-npm.install("cowsay")
+# npm.install("cowsay")

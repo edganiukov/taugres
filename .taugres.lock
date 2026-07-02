@@ -4,30 +4,6 @@
     "go": {
       "requested": "1.26.2",
       "resolved": "1.26.2"
-    },
-    "node": {
-      "requested": "",
-      "resolved": "26.4.0"
-    },
-    "python": {
-      "requested": "",
-      "resolved": "3.14.6"
-    },
-    "uv": {
-      "requested": "",
-      "resolved": "0.11.26"
-    }
-  },
-  "npm": {
-    "cowsay": {
-      "requested": "",
-      "resolved": "1.6.0"
-    }
-  },
-  "uv": {
-    "ruff": {
-      "requested": "0.6.9",
-      "resolved": "0.6.9"
     }
   }
 }
