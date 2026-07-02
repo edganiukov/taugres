@@ -10,6 +10,7 @@ package mise
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,35 @@ func ref(t model.MiseTool) string {
 func install(refs []string, out io.Writer) error {
 	cmd := exec.Command(Binary, append([]string{"install"}, refs...)...)
 	return toolenv.Run(cmd, out, outputPrefix, "mise install "+strings.Join(refs, " "))
+}
+
+// binDir finds the directory holding a tool's executables within its install
+// dir. Layouts vary by backend: most tools use <install>/bin, some put the
+// binary at the root, and archive backends (ubi) may extract into a nested dir
+// with no bin/ (e.g. uv -> <install>/uv-x86_64-unknown-linux-musl/uv). Keyed on
+// the tool name so there is no per-tool special case.
+func binDir(install, name string) string {
+	if b := filepath.Join(install, "bin"); toolenv.IsDir(b) {
+		return b
+	}
+	if toolenv.IsExecutable(filepath.Join(install, name)) {
+		return install
+	}
+	// Look one level down for <sub>/<name> or <sub>/bin.
+	entries, _ := os.ReadDir(install)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		sub := filepath.Join(install, e.Name())
+		if toolenv.IsExecutable(filepath.Join(sub, name)) {
+			return sub
+		}
+		if b := filepath.Join(sub, "bin"); toolenv.IsDir(b) {
+			return b
+		}
+	}
+	return install
 }
 
 // where returns the install directory for a tool via `mise where`.
@@ -113,14 +143,10 @@ func Install(tools []model.MiseTool, out io.Writer, report Reporter) ([]Installe
 			missing = append(missing, ref(t))
 			continue
 		}
-		binDir := dir
-		if b := filepath.Join(dir, "bin"); toolenv.IsDir(b) {
-			binDir = b
-		}
 		installed = append(installed, Installed{
 			Name:     t.Name,
 			Resolved: filepath.Base(dir), // mise stores installs as <tool>/<version>
-			BinDir:   binDir,
+			BinDir:   binDir(dir, t.Name),
 		})
 	}
 	finish(len(missing) == 0)

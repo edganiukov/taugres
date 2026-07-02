@@ -85,3 +85,37 @@ func TestInstallNoToolsIsNoop(t *testing.T) {
 		t.Errorf("empty install should be a no-op, got %v err=%v", installed, err)
 	}
 }
+
+func TestBinDirLayouts(t *testing.T) {
+	root := testutil.TempWorkspace(t)
+
+	// Standard: <install>/bin/<tool>.
+	std := filepath.Join(root, "std")
+	testutil.WriteExec(t, std, "bin/node", "#!/bin/sh\n")
+	if got := binDir(std, "node"); got != filepath.Join(std, "bin") {
+		t.Errorf("bin/ layout: got %q", got)
+	}
+
+	// Root: <install>/<tool>.
+	rootLayout := filepath.Join(root, "rootl")
+	testutil.WriteExec(t, rootLayout, "rg", "#!/bin/sh\n")
+	if got := binDir(rootLayout, "rg"); got != rootLayout {
+		t.Errorf("root layout: got %q", got)
+	}
+
+	// Nested (ubi archive dir, no bin/): <install>/<sub>/<tool>.
+	nested := filepath.Join(root, "nested")
+	testutil.WriteExec(t, nested, "uv-x86_64-unknown-linux-musl/uv", "#!/bin/sh\n")
+	if got := binDir(nested, "uv"); got != filepath.Join(nested, "uv-x86_64-unknown-linux-musl") {
+		t.Errorf("nested layout: got %q", got)
+	}
+
+	// Unknown: fall back to the install dir.
+	empty := filepath.Join(root, "empty")
+	if err := os.MkdirAll(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := binDir(empty, "whatever"); got != empty {
+		t.Errorf("fallback: got %q", got)
+	}
+}

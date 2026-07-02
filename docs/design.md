@@ -192,7 +192,8 @@ shell.hook(shells=[...], content=... | file=...)       # raw activation snippet
 # "@" is the uniform pin separator (translated to pip's "==" internally); the
 # last "@" wins so npm scoped names stay intact.
 mise.tool("go@1.26.2")   | mise.tool(["go@1.26.2", "python"])
-pip.install("ruff@0.6.9") | pip.install(["ruff@0.6.9", "rich"])
+pip.install("ruff@0.6.9") | pip.install(["ruff@0.6.9", "rich"])   # Python via pip
+uv.install("ruff@0.6.9")  | uv.install(["ruff@0.6.9", "rich"])    # Python via uv (faster)
 npm.install("typescript") | npm.install(["typescript@5.6.2", "@scope/x@1"])
 
 platform.os                     # "linux" | "macos"
@@ -369,10 +370,14 @@ approach broke tools that resolve files relative to their invocation path
 real dir avoids that class of bug entirely. `mise where` yields both the bin dir
 and the resolved version.
 
-### pip / npm
+### pip / uv / npm
 
 - **pip** installs into a project-local virtualenv at `.taugres/tools/pip`
   (bin prepended), using the mise-provided Python. Never touches system Python.
+- **uv** is the faster modern alternative: `uv.install(...)` creates and installs
+  into a venv at `.taugres/tools/uv` with `uv pip`, using the mise-provided
+  Python and an implicit mise `uv` (falling back to `uv` on PATH). Same venv/PATH
+  model as pip.
 - **npm** installs into a project-local prefix at `.taugres/tools/npm` via
   `npm install -g --prefix`, using mise-provided node; CLIs run directly (like
   npx).
@@ -380,7 +385,7 @@ and the resolved version.
 ### Execution
 
 Installs run during `tau sync` only. mise installs all tools in one batched
-invocation (mise parallelizes internally); pip and npm run **concurrently** with
+invocation (mise parallelizes internally); pip, uv, and npm run **concurrently** with
 each other (independent prefixes) after mise completes. Installs are
 **best-effort**: a failure is reported but does not abort — the shell env (vars,
 PATH, aliases, functions) is always generated so the shell still works, and the

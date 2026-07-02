@@ -49,6 +49,14 @@ type NpmPackage struct {
 	Version string `json:"version"`
 }
 
+// UvPackage is a Python package installed via uv into a project-local venv,
+// declared with uv.install(name, version). Like PipPackage but backed by uv
+// (faster; manages the venv itself). An empty Version means latest.
+type UvPackage struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
 // Plan is the fully normalized, resolved environment plan. All paths are
 // absolute. Renderers should be able to produce shell scripts from this struct
 // without further resolution.
@@ -88,6 +96,9 @@ type Plan struct {
 	// NpmPackages declared with npm.install(...), in declaration order.
 	NpmPackages []NpmPackage `json:"npmPackages"`
 
+	// UvPackages declared with uv.install(...), in declaration order.
+	UvPackages []UvPackage `json:"uvPackages,omitempty"`
+
 	// PipDir is the project-local pip virtualenv (<stateDir>/tools/pip). It is
 	// set when PipPackages is non-empty; its bin/ is auto-prepended to PATH.
 	PipDir string `json:"pipDir,omitempty"`
@@ -95,6 +106,10 @@ type Plan struct {
 	// NpmDir is the project-local npm prefix (<stateDir>/tools/npm). It is set
 	// when NpmPackages is non-empty; its bin/ is auto-prepended to PATH.
 	NpmDir string `json:"npmDir,omitempty"`
+
+	// UvDir is the project-local uv virtualenv (<stateDir>/tools/uv). It is set
+	// when UvPackages is non-empty; its bin/ is auto-prepended to PATH.
+	UvDir string `json:"uvDir,omitempty"`
 }
 
 // ProjectToolBinDirs returns the project-local tool bin directories (pip venv,
@@ -107,6 +122,9 @@ func (p *Plan) ProjectToolBinDirs() []string {
 	}
 	if p.NpmDir != "" {
 		dirs = append(dirs, filepath.Join(p.NpmDir, "bin"))
+	}
+	if p.UvDir != "" {
+		dirs = append(dirs, filepath.Join(p.UvDir, "bin"))
 	}
 	return dirs
 }

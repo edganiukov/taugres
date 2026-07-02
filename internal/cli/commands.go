@@ -20,6 +20,7 @@ import (
 	"go.gnkv.dev/taugres/internal/tools/mise"
 	"go.gnkv.dev/taugres/internal/tools/npm"
 	"go.gnkv.dev/taugres/internal/tools/pip"
+	"go.gnkv.dev/taugres/internal/tools/uv"
 	"go.gnkv.dev/taugres/internal/trust"
 	"go.gnkv.dev/taugres/internal/ui"
 	"go.gnkv.dev/taugres/internal/validate"
@@ -36,8 +37,8 @@ project("%s")
 # Tools/packages install via mise/pip/npm and are added to PATH automatically
 # on activation (their real bin dirs are prepended, like mise activate). Each
 # takes a name, a "name@version" spec, or a list of specs.
-# mise.tool(["node@22.11.0", "ripgrep"])
-# pip.install(["ruff@0.6.9", "rich"])
+# mise.tool(["node@22.11.0", "ripgrep"])   # also mise backends: go:/cargo:/npm:/ubi:/aqua:
+# pip.install(["ruff@0.6.9", "rich"])       # or uv.install([...]) (faster)
 # npm.install("typescript")
 
 # Paths are repository-root anchored with //.
@@ -289,15 +290,16 @@ func runSync(e *Env, args []string) int {
 			return dirs
 		}
 
-		// The pip/npm toolchain (node for npm, python for pip) is installed
-		// first and in isolation, so a failure of any *other* mise tool can never
-		// stop pip/npm from getting their runtime. finalize guarantees an
-		// implicit node/python whenever npm/pip packages are declared.
+		// The package toolchain (node for npm; python for pip/uv; uv for uv) is
+		// installed first and in isolation, so a failure of any *other* mise tool
+		// can never stop pip/uv/npm from getting their runtime. finalize
+		// guarantees these implicit tools whenever the packages are declared.
 		needNode := len(plan.NpmPackages) > 0
-		needPython := len(plan.PipPackages) > 0
+		needPython := len(plan.PipPackages) > 0 || len(plan.UvPackages) > 0
+		needUv := len(plan.UvPackages) > 0
 		var toolchain, rest []model.MiseTool
 		for _, t := range effMise {
-			if (needNode && t.Name == "node") || (needPython && t.Name == "python") {
+			if (needNode && t.Name == "node") || (needPython && t.Name == "python") || (needUv && t.Name == "uv") {
 				toolchain = append(toolchain, t)
 			} else {
 				rest = append(rest, t)
@@ -365,6 +367,26 @@ func runSync(e *Env, args []string) int {
 				for i, p := range plan.NpmPackages {
 					if v, ok := resolved[p.Name]; ok {
 						lk.Npm[p.Name] = lock.Entry{Requested: plan.NpmPackages[i].Version, Resolved: v}
+					}
+				}
+			}()
+		}
+		if len(plan.UvPackages) > 0 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				eff := make([]model.UvPackage, len(plan.UvPackages))
+				for i, p := range plan.UvPackages {
+					e, ok := lk.Uv[p.Name]
+					eff[i] = model.UvPackage{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, *update)}
+				}
+				resolved, err := uv.Install(eff, plan.UvDir, toolchainBinDirs, rep.Stream("uv: "), installReport)
+				if err != nil {
+					addErr(err.Error())
+				}
+				for i, p := range plan.UvPackages {
+					if v, ok := resolved[p.Name]; ok {
+						lk.Uv[p.Name] = lock.Entry{Requested: plan.UvPackages[i].Version, Resolved: v}
 					}
 				}
 			}()
@@ -572,6 +594,19 @@ func gcTools(plan *model.Plan, lk *lock.File, toolchainBins []string, rep *ui.Re
 			delete(lk.Npm, n)
 		}
 	}
+
+	// uv: symmetric with pip.
+	uvDir := filepath.Join(plan.StateDir, "tools", "uv")
+	if len(plan.UvPackages) == 0 {
+		_ = os.RemoveAll(uvDir)
+		lk.Uv = map[string]lock.Entry{}
+	} else if removed := removedKeys(lk.Uv, uvNames(plan)); len(removed) > 0 {
+		rep.Step("tau: removing " + strings.Join(removed, ", "))
+		_ = uv.Uninstall(uvDir, removed, toolchainBins, rep.Stream("uv: "))
+		for _, n := range removed {
+			delete(lk.Uv, n)
+		}
+	}
 }
 
 // removedKeys returns the sorted lock keys that are absent from keep.
@@ -597,6 +632,14 @@ func pipNames(p *model.Plan) map[string]bool {
 func npmNames(p *model.Plan) map[string]bool {
 	m := map[string]bool{}
 	for _, x := range p.NpmPackages {
+		m[x.Name] = true
+	}
+	return m
+}
+
+func uvNames(p *model.Plan) map[string]bool {
+	m := map[string]bool{}
+	for _, x := range p.UvPackages {
 		m[x.Name] = true
 	}
 	return m
@@ -750,6 +793,17 @@ func runStatus(e *Env, args []string) int {
 				ver = "latest"
 			}
 			fmt.Fprintf(e.Stdout, "  %s@%s\n", p.Name, ver)
+		}
+	}
+
+	if len(plan.UvPackages) > 0 {
+		fmt.Fprintf(e.Stdout, "\nuv packages:\n")
+		for _, p := range plan.UvPackages {
+			ver := p.Version
+			if ver == "" {
+				ver = "latest"
+			}
+			fmt.Fprintf(e.Stdout, "  %s==%s\n", p.Name, ver)
 		}
 	}
 

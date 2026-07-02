@@ -256,6 +256,31 @@ pip.install("rich")
 	}
 }
 
+func TestUvInstallImpliesToolchainAndPrependsBin(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+uv.install(["ruff@0.6.9", "rich"])
+`)
+	res := evalWorkspace(t, dir)
+	p := res.Plan
+	if len(p.UvPackages) != 2 || p.UvPackages[0] != (model.UvPackage{Name: "ruff", Version: "0.6.9"}) {
+		t.Fatalf("UvPackages = %+v", p.UvPackages)
+	}
+	wantUv := filepath.Join(dir, ".taugres", "tools", "uv")
+	if p.UvDir != wantUv {
+		t.Errorf("UvDir = %q, want %q", p.UvDir, wantUv)
+	}
+	// uv implies both an implicit mise `python` and `uv` tool.
+	if !hasMiseTool(p.MiseTools, "python") || !hasMiseTool(p.MiseTools, "uv") {
+		t.Errorf("expected implicit mise python + uv tools, got %+v", p.MiseTools)
+	}
+	wantBin := filepath.Join(wantUv, "bin")
+	if len(p.PathPrepend) != 1 || p.PathPrepend[0] != wantBin {
+		t.Errorf("PathPrepend = %v, want [%s]", p.PathPrepend, wantBin)
+	}
+}
+
 func TestNpmInstallAutoPrependsNpmBin(t *testing.T) {
 	dir := testutil.TempWorkspace(t)
 	testutil.WriteFile(t, dir, "workspace.tg", `

@@ -122,6 +122,9 @@ mise.tool("go@1.26.2")                   # single spec
 # Python packages via pip, into a project-local venv (.taugres/tools/pip)
 pip.install(["ruff@0.6.9", "rich"])
 
+# ...or via uv (faster; manages the venv itself), into .taugres/tools/uv
+uv.install(["ruff@0.6.9", "rich"])
+
 # Node packages via npm, into a project-local prefix (.taugres/tools/npm).
 # Their CLIs become runnable directly — like npx, but resolved locally.
 npm.install(["typescript@5.6.2", "@angular/cli@17"])
@@ -135,15 +138,38 @@ How each is exposed on PATH (activation prepends real bin dirs directly, the way
 - **pip** installs into a project-local venv at `.taugres/tools/pip`; tau
   prepends `.taugres/tools/pip/bin` (which also gives the project its own
   `python`). Never touches system Python.
+- **uv** is the faster modern alternative to pip: `uv.install(...)` creates and
+  installs into a venv at `.taugres/tools/uv` (implies an implicit mise `uv` +
+  `python`); tau prepends `.taugres/tools/uv/bin`.
 - **npm** installs into a project-local prefix at `.taugres/tools/npm` via
   `npm install -g --prefix`; tau prepends `.taugres/tools/npm/bin`.
 
-**mise is a hard dependency** for tools/packages: `pip` and `npm` run on the
-`python`/`node` that mise provisions (declaring `pip.install`/`npm.install`
-implies an implicit `mise.tool("python")`/`mise.tool("node")`). Tool output is
-shown only with `tau sync --verbose`; otherwise a single progress line is shown.
-Installs are best-effort — if one fails, the shell env is still generated and
-the failure is reported.
+### mise backends: install almost anything
+
+Beyond its short names, `mise.tool(...)` accepts mise's backends, so most tools
+need no dedicated tau builtin — prefix the spec with the backend:
+
+```python
+mise.tool([
+    "go:github.com/pressly/goose/v3/cmd/goose",   # a Go module's binary
+    "cargo:ripgrep",                               # a Rust crate
+    "npm:typescript",                              # an npm global
+    "pipx:ruff",                                   # an isolated Python CLI
+    "ubi:cli/cli",                                 # a GitHub release (owner/repo)
+    "aqua:pressly/goose",                          # via the aqua registry
+])
+```
+
+`@version` still applies (`"cargo:ripgrep@14.1.1"`). Backends that hit the GitHub
+API (`ubi`/`aqua`/github releases) need `GITHUB_TOKEN`/`MISE_GITHUB_TOKEN` set to
+avoid unauthenticated rate limits.
+
+**mise is a hard dependency** for tools/packages: `pip`/`uv`/`npm` run on the
+`python`/`node` that mise provisions (declaring `pip.install`/`uv.install`/
+`npm.install` implies an implicit `mise.tool("python")`/`mise.tool("node")`).
+Tool output is shown only with `tau sync --verbose`; otherwise a single progress
+line is shown. Installs are best-effort — if one fails, the shell env is still
+generated and the failure is reported.
 
 Note the distinction from committed scripts: your own `bin/` scripts are exposed
 explicitly with `shell.path.prepend("//bin")`, while everything under `.taugres/` is

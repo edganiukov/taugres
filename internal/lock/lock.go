@@ -31,6 +31,7 @@ type File struct {
 	Mise            map[string]Entry `json:"mise,omitempty"`
 	Pip             map[string]Entry `json:"pip,omitempty"`
 	Npm             map[string]Entry `json:"npm,omitempty"`
+	Uv              map[string]Entry `json:"uv,omitempty"`
 }
 
 // Path returns the lockfile path for a project root.
@@ -61,6 +62,9 @@ func Load(projectRoot string) (*File, error) {
 	if f.Npm == nil {
 		f.Npm = map[string]Entry{}
 	}
+	if f.Uv == nil {
+		f.Uv = map[string]Entry{}
+	}
 	return &f, nil
 }
 
@@ -71,6 +75,7 @@ func New() *File {
 		Mise:            map[string]Entry{},
 		Pip:             map[string]Entry{},
 		Npm:             map[string]Entry{},
+		Uv:              map[string]Entry{},
 	}
 }
 

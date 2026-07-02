@@ -78,6 +78,7 @@ type builder struct {
 	miseTools   []model.MiseTool
 	pipPackages []model.PipPackage
 	npmPackages []model.NpmPackage
+	uvPackages  []model.UvPackage
 
 	aliases     map[string]string
 	sourceFuncs map[string][]model.SourceFunc
@@ -135,6 +136,10 @@ func (b *builder) predeclared() starlark.StringDict {
 		"install": b.builtin("pip.install", b.pipInstallFn),
 	})
 
+	uvModule := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
+		"install": b.builtin("uv.install", b.uvInstallFn),
+	})
+
 	npmModule := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
 		"install": b.builtin("npm.install", b.npmInstallFn),
 	})
@@ -149,6 +154,7 @@ func (b *builder) predeclared() starlark.StringDict {
 		"shell":    shellModule,
 		"mise":     miseModule,
 		"pip":      pipModule,
+		"uv":       uvModule,
 		"npm":      npmModule,
 		"platform": platformModule,
 	}
@@ -326,6 +332,17 @@ func (b *builder) npmInstallFn(_ *starlark.Thread, fn *starlark.Builtin, args st
 	return starlark.None, nil
 }
 
+func (b *builder) uvInstallFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	specs, err := unpackSpecs(fn.Name(), args, kwargs)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range specs {
+		b.uvPackages = append(b.uvPackages, model.UvPackage{Name: s.name, Version: s.version})
+	}
+	return starlark.None, nil
+}
+
 // nameVersion is a parsed tool/package spec.
 type nameVersion struct{ name, version string }
 
@@ -464,16 +481,20 @@ func (b *builder) finalize() (*model.Plan, error) {
 	p.Hooks = b.hooks
 	p.PipPackages = b.pipPackages
 	p.NpmPackages = b.npmPackages
+	p.UvPackages = b.uvPackages
 
-	// pip/npm run on a toolchain that tau provisions via mise, so declaring
-	// packages implies the matching runtime: pip -> python, npm -> node. Add
-	// these implicitly unless the user already pinned them.
+	// pip/uv/npm run on a toolchain that tau provisions via mise, so declaring
+	// packages implies the matching runtime: pip/uv -> python, npm -> node, and
+	// uv also needs the uv binary. Add these implicitly unless already pinned.
 	tools := append([]model.MiseTool{}, b.miseTools...)
-	if len(b.pipPackages) > 0 && !hasMiseTool(tools, "python") {
+	if (len(b.pipPackages) > 0 || len(b.uvPackages) > 0) && !hasMiseTool(tools, "python") {
 		tools = append(tools, model.MiseTool{Name: "python"})
 	}
 	if len(b.npmPackages) > 0 && !hasMiseTool(tools, "node") {
 		tools = append(tools, model.MiseTool{Name: "node"})
+	}
+	if len(b.uvPackages) > 0 && !hasMiseTool(tools, "uv") {
+		tools = append(tools, model.MiseTool{Name: "uv"})
 	}
 	p.MiseTools = tools
 
@@ -491,6 +512,10 @@ func (b *builder) finalize() (*model.Plan, error) {
 	if len(b.npmPackages) > 0 {
 		p.NpmDir = filepath.Join(p.StateDir, "tools", "npm")
 		prepend = append(prepend, filepath.Join(p.NpmDir, "bin"))
+	}
+	if len(b.uvPackages) > 0 {
+		p.UvDir = filepath.Join(p.StateDir, "tools", "uv")
+		prepend = append(prepend, filepath.Join(p.UvDir, "bin"))
 	}
 	prepend = append(prepend, b.pathPrepend...)
 
