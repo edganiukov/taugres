@@ -44,17 +44,6 @@ func BinDir(npmDir string) string {
 	return filepath.Join(npmDir, "bin")
 }
 
-// resolveNpm returns the npm executable to run: from the mise toolchain bin
-// dirs if present, else "npm" from PATH.
-func resolveNpm(toolchainBins []string) string {
-	for _, dir := range toolchainBins {
-		if p := filepath.Join(dir, "npm"); toolenv.IsExecutable(p) {
-			return p
-		}
-	}
-	return "npm"
-}
-
 // Install installs the given packages into the project-local npm prefix at
 // npmDir (each NpmPackage.Version is the exact spec to install), using npm/node
 // from the mise toolchain dirs. It returns each package's resolved concrete
@@ -63,7 +52,7 @@ func Install(pkgs []model.NpmPackage, npmDir string, toolchainBins []string, out
 	if len(pkgs) == 0 {
 		return nil, nil
 	}
-	npmExe := resolveNpm(toolchainBins)
+	npmExe := toolenv.Resolve(toolchainBins, "npm")
 	if _, err := exec.LookPath(npmExe); err != nil {
 		return nil, fmt.Errorf("npm.install: npm not found (expected mise to provide node): %s", npmExe)
 	}
@@ -104,7 +93,7 @@ func Uninstall(npmDir string, names []string, toolchainBins []string, out io.Wri
 	if !toolenv.IsDir(filepath.Join(npmDir, "lib", "node_modules")) {
 		return nil // nothing installed
 	}
-	npmExe := resolveNpm(toolchainBins)
+	npmExe := toolenv.Resolve(toolchainBins, "npm")
 	args := append([]string{"uninstall", "-g", "--prefix", npmDir}, names...)
 	return run(npmExe, args, toolchainBins, out, "npm uninstall")
 }

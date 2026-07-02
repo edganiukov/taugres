@@ -41,20 +41,6 @@ func BinDir(venvDir string) string {
 	return filepath.Join(venvDir, "bin")
 }
 
-// resolvePython picks the interpreter for creating the venv. It prefers python3
-// (then python) from the mise toolchain bin dirs, falling back to whatever is
-// on PATH.
-func resolvePython(toolchainBins []string) string {
-	for _, dir := range toolchainBins {
-		for _, name := range []string{"python3", "python"} {
-			if p := filepath.Join(dir, name); toolenv.IsExecutable(p) {
-				return p
-			}
-		}
-	}
-	return "python3"
-}
-
 // Install ensures a venv exists at venvDir and installs the given packages into
 // it (each PipPackage.Version is the exact spec to install), using the Python
 // interpreter from the mise toolchain dirs. It returns each package's resolved
@@ -63,7 +49,7 @@ func Install(pkgs []model.PipPackage, venvDir string, toolchainBins []string, ou
 	if len(pkgs) == 0 {
 		return nil, nil
 	}
-	python := resolvePython(toolchainBins)
+	python := toolenv.Resolve(toolchainBins, "python3", "python")
 	if _, err := exec.LookPath(python); err != nil {
 		return nil, fmt.Errorf("pip.install: python interpreter not found (expected mise to provide it): %s", python)
 	}
@@ -116,12 +102,7 @@ func installedVersion(pipBin, name string) string {
 	if err != nil {
 		return ""
 	}
-	for line := range strings.SplitSeq(string(out), "\n") {
-		if v, ok := strings.CutPrefix(line, "Version:"); ok {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
+	return toolenv.ScrapeVersion(out)
 }
 
 // ensureVenv creates the virtualenv with the given python if its bin/pip is not

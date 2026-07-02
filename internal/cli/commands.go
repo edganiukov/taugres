@@ -550,10 +550,7 @@ func buildManifest(res *config.Result, shells []string) (*state.Manifest, error)
 // pruned; pip/npm packages are uninstalled from their project-local prefixes.
 func gcTools(plan *model.Plan, lk *lock.File, toolchainBins []string, rep *ui.Reporter) {
 	// mise: prune lock entries for tools no longer declared.
-	keep := map[string]bool{}
-	for _, t := range plan.MiseTools {
-		keep[t.Name] = true
-	}
+	keep := nameSet(plan.MiseTools, func(t model.MiseTool) string { return t.Name })
 	for name := range lk.Mise {
 		if !keep[name] {
 			delete(lk.Mise, name)
@@ -566,7 +563,7 @@ func gcTools(plan *model.Plan, lk *lock.File, toolchainBins []string, rep *ui.Re
 	if len(plan.PipPackages) == 0 {
 		_ = os.RemoveAll(pipDir)
 		lk.Pip = map[string]lock.Entry{}
-	} else if removed := removedKeys(lk.Pip, pipNames(plan)); len(removed) > 0 {
+	} else if removed := removedKeys(lk.Pip, nameSet(plan.PipPackages, func(p model.PipPackage) string { return p.Name })); len(removed) > 0 {
 		rep.Step("tau: removing " + strings.Join(removed, ", "))
 		_ = pip.Uninstall(pipDir, removed, rep.Stream("pip: "))
 		for _, n := range removed {
@@ -579,7 +576,7 @@ func gcTools(plan *model.Plan, lk *lock.File, toolchainBins []string, rep *ui.Re
 	if len(plan.NpmPackages) == 0 {
 		_ = os.RemoveAll(npmDir)
 		lk.Npm = map[string]lock.Entry{}
-	} else if removed := removedKeys(lk.Npm, npmNames(plan)); len(removed) > 0 {
+	} else if removed := removedKeys(lk.Npm, nameSet(plan.NpmPackages, func(p model.NpmPackage) string { return p.Name })); len(removed) > 0 {
 		rep.Step("tau: removing " + strings.Join(removed, ", "))
 		_ = npm.Uninstall(npmDir, removed, toolchainBins, rep.Stream("npm: "))
 		for _, n := range removed {
@@ -592,7 +589,7 @@ func gcTools(plan *model.Plan, lk *lock.File, toolchainBins []string, rep *ui.Re
 	if len(plan.UvPackages) == 0 {
 		_ = os.RemoveAll(uvDir)
 		lk.Uv = map[string]lock.Entry{}
-	} else if removed := removedKeys(lk.Uv, uvNames(plan)); len(removed) > 0 {
+	} else if removed := removedKeys(lk.Uv, nameSet(plan.UvPackages, func(p model.UvPackage) string { return p.Name })); len(removed) > 0 {
 		rep.Step("tau: removing " + strings.Join(removed, ", "))
 		_ = uv.Uninstall(uvDir, removed, toolchainBins, rep.Stream("uv: "))
 		for _, n := range removed {
@@ -613,26 +610,11 @@ func removedKeys(entries map[string]lock.Entry, keep map[string]bool) []string {
 	return out
 }
 
-func pipNames(p *model.Plan) map[string]bool {
-	m := map[string]bool{}
-	for _, x := range p.PipPackages {
-		m[x.Name] = true
-	}
-	return m
-}
-
-func npmNames(p *model.Plan) map[string]bool {
-	m := map[string]bool{}
-	for _, x := range p.NpmPackages {
-		m[x.Name] = true
-	}
-	return m
-}
-
-func uvNames(p *model.Plan) map[string]bool {
-	m := map[string]bool{}
-	for _, x := range p.UvPackages {
-		m[x.Name] = true
+// nameSet builds a set of names from a package/tool slice.
+func nameSet[T any](items []T, name func(T) string) map[string]bool {
+	m := make(map[string]bool, len(items))
+	for _, it := range items {
+		m[name(it)] = true
 	}
 	return m
 }
@@ -678,7 +660,7 @@ func ensureGitignore(projectRoot string) {
 	gi := filepath.Join(projectRoot, ".gitignore")
 	data, err := os.ReadFile(gi)
 	if err == nil {
-		if slices.Contains(splitLines(string(data)), ".taugres/") {
+		if slices.Contains(strings.Split(string(data), "\n"), ".taugres/") {
 			return
 		}
 		f, err := os.OpenFile(gi, os.O_APPEND|os.O_WRONLY, 0o644)
@@ -692,21 +674,6 @@ func ensureGitignore(projectRoot string) {
 	if os.IsNotExist(err) {
 		_ = os.WriteFile(gi, []byte(".taugres/\n"), 0o644)
 	}
-}
-
-func splitLines(s string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		out = append(out, s[start:])
-	}
-	return out
 }
 
 // --- update ---

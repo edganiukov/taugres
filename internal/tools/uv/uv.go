@@ -38,17 +38,6 @@ func BinDir(venvDir string) string {
 	return filepath.Join(venvDir, "bin")
 }
 
-// resolve picks an executable named tool from the mise toolchain bin dirs,
-// falling back to the name on PATH.
-func resolve(toolchainBins []string, tool string) string {
-	for _, dir := range toolchainBins {
-		if p := filepath.Join(dir, tool); toolenv.IsExecutable(p) {
-			return p
-		}
-	}
-	return tool
-}
-
 // Install ensures a uv venv exists at venvDir and installs the given packages
 // into it (each UvPackage.Version is the exact spec), using uv/python from the
 // mise toolchain dirs. It returns each package's resolved concrete version.
@@ -57,16 +46,13 @@ func Install(pkgs []model.UvPackage, venvDir string, toolchainBins []string, out
 	if len(pkgs) == 0 {
 		return nil, nil
 	}
-	uvExe := resolve(toolchainBins, "uv")
+	uvExe := toolenv.Resolve(toolchainBins, "uv")
 	if _, err := exec.LookPath(uvExe); err != nil {
 		return nil, fmt.Errorf("uv.install: uv not found (expected mise to provide it): %s", uvExe)
 	}
 	venvPython := filepath.Join(BinDir(venvDir), "python")
 	if !toolenv.IsExecutable(venvPython) {
-		python := resolve(toolchainBins, "python3")
-		if !toolenv.IsExecutable(python) {
-			python = resolve(toolchainBins, "python")
-		}
+		python := toolenv.Resolve(toolchainBins, "python3", "python")
 		if err := run(uvExe, []string{"venv", "--python", python, venvDir}, out, "uv venv"); err != nil {
 			return nil, err
 		}
@@ -105,7 +91,7 @@ func Uninstall(venvDir string, names []string, toolchainBins []string, out io.Wr
 	if !toolenv.IsExecutable(venvPython) {
 		return nil // no venv, nothing to remove
 	}
-	uvExe := resolve(toolchainBins, "uv")
+	uvExe := toolenv.Resolve(toolchainBins, "uv")
 	args := append([]string{"pip", "uninstall", "--python", venvPython}, names...)
 	return run(uvExe, args, out, "uv pip uninstall")
 }
@@ -117,12 +103,7 @@ func installedVersion(uvExe, venvPython, name string) string {
 	if err != nil {
 		return ""
 	}
-	for line := range strings.SplitSeq(string(out), "\n") {
-		if v, ok := strings.CutPrefix(line, "Version:"); ok {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
+	return toolenv.ScrapeVersion(out)
 }
 
 func run(bin string, args []string, out io.Writer, what string) error {

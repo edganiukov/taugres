@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/edganiukov/taugres/internal/ui"
@@ -60,4 +61,30 @@ func IsExecutable(p string) bool {
 		return false
 	}
 	return info.Mode()&0o111 != 0
+}
+
+// Resolve returns the first of names found as an executable in the given bin
+// dirs (each dir is checked for every name in order). If none is found it
+// returns names[0] as a bare fallback to be looked up on PATH. Shared by the
+// pip/uv/npm integrations to locate their mise-provisioned interpreters.
+func Resolve(bins []string, names ...string) string {
+	for _, dir := range bins {
+		for _, n := range names {
+			if p := filepath.Join(dir, n); IsExecutable(p) {
+				return p
+			}
+		}
+	}
+	return names[0]
+}
+
+// ScrapeVersion extracts the value of the first "Version:" line from `pip show`
+// / `uv pip show` output, or "" if absent.
+func ScrapeVersion(out []byte) string {
+	for line := range strings.SplitSeq(string(out), "\n") {
+		if v, ok := strings.CutPrefix(line, "Version:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
