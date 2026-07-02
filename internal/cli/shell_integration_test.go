@@ -251,6 +251,66 @@ echo "SCOPE=${SCOPE:-unset}"`
 	}
 }
 
+// TestBashHookResyncsOnProbeChange proves that a config branching on exists()
+// re-syncs (fork-free detection) when the probed file appears — without any
+// config-file edit. The hook records the probe result and notices the flip.
+func TestBashHookResyncsOnProbeChange(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	tau := builtTau(t)
+	cfgHome := t.TempDir()
+	cacheHome := t.TempDir()
+	env := append(os.Environ(), "XDG_CONFIG_HOME="+cfgHome, "XDG_CACHE_HOME="+cacheHome)
+
+	repo := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, repo, "workspace.tg",
+		"project(\"demo\")\nif exists(\"//trigger\"):\n    shell.env(\"TRIG\", \"yes\")\n")
+
+	runTau := func(args ...string) {
+		c := exec.Command(tau, args...)
+		c.Dir = repo
+		c.Env = env
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("tau %v: %v\n%s", args, err, out)
+		}
+	}
+	runTau("allow")
+	runTau("sync") // initial sync: trigger absent -> TRIG unset, probe recorded as 0
+
+	hookCmd := exec.Command(tau, "hook", "bash")
+	hookCmd.Env = env
+	hb, err := hookCmd.Output()
+	if err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+
+	// Enter (TRIG unset), then create the probed file and prompt again: the hook
+	// must detect the exists() flip and auto-sync so TRIG becomes set.
+	// The `sleep 1` crosses a second boundary so the regenerated activate.bash
+	// has a newer mtime than the first activation (the hook keys reactivation on
+	// that mtime, which stat reports at 1s granularity).
+	script := string(hb) + `
+prompt() { local c; for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done; }
+cd "` + repo + `"; prompt; echo "BEFORE TRIG=${TRIG:-unset}"
+sleep 1
+touch "` + repo + `/trigger"; prompt; echo "AFTER TRIG=${TRIG:-unset}"`
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", script)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash failed: %v\n%s", err, out)
+	}
+	got := string(out)
+	if !strings.Contains(got, "BEFORE TRIG=unset") {
+		t.Errorf("expected TRIG unset before the probe flips:\n%s", got)
+	}
+	if !strings.Contains(got, "AFTER TRIG=yes") {
+		t.Errorf("probe change did not trigger a resync (TRIG not set):\n%s", got)
+	}
+}
+
 // TestBashHookActivatesOnCd verifies the direnv-style wiring: installing the
 // hook registers _tau_prompt_hook in PROMPT_COMMAND, and running that (as bash
 // does before each prompt) activates/deactivates as the directory changes.

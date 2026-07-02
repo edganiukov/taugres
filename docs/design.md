@@ -95,7 +95,7 @@ project/
   service-a/project.tg  # optional nested project config
   .taugres/             # generated/local, git-ignored as a whole
     gen/                # activate/deactivate.{bash,zsh,fish}, manifest.json,
-                        # sources, tooldirs
+                        # sources, tooldirs, probes
     tools/
       pip/              # project-local pip virtualenv
       npm/              # project-local npm prefix
@@ -302,15 +302,33 @@ preserving any existing scalar or array (bash ≥ 5.1) value.
 On each prompt the hook:
 
 1. walks up to the nearest config dir (pure shell);
-2. computes a cheap staleness signal — is any recorded **source** (the config
-   file, a `load(...)` module, or a `shell.fn`/`shell.hook` file listed in
-   `.taugres/gen/sources`) newer than `manifest.json`, or is a recorded tool dir
-   in `.taugres/gen/tooldirs` missing?
+2. computes a cheap staleness signal from a set of independent **checks**, using
+   only shell builtins (no subprocess on the common path);
 3. if stale, runs `tau sync --if-stale` — guarded by a per-shell token
    (`_TAU_TRIED`) so a persistently failing sync is not retried until the inputs
    change (no re-sync storm);
 4. (re)activates via `eval "$(tau activate <shell>)"` when entering/switching or
    when the generated env changed (tracked by `_TAU_ACT_TOKEN`).
+
+### Staleness checks
+
+Staleness is a set of independent dimensions, each recording state under
+`.taugres/gen/` at sync time and detecting drift later. They are defined once in
+`internal/state` (`checks`) and drive both the Go path and the shell hook:
+
+| Check | Recorded file | Drift when… |
+| --- | --- | --- |
+| sources | `sources` | a config input (the config file, a `load(...)` module, a `shell.fn`/`shell.hook` file) is newer than `manifest.json` |
+| tooldirs | `tooldirs` | a recorded tool bin dir (mise store, pip/uv venv, npm prefix) is missing |
+| probes | `probes` | an `exists()`/`which()` result changed (a probed file appeared/vanished, a binary was installed/removed) |
+
+Each check contributes a Go evaluator, run **concurrently** in `NeedsSync` /
+`CheckStale`, and two pure-shell fragments spliced into the hook: a *detect*
+fragment (builtins only, every prompt, sets `stale`) and a *token* fragment (only
+on the stale path, may `stat`, feeds the `_TAU_TRIED` retry token so a genuine
+change forces exactly one resync). Adding a new dimension is one entry in
+`checks` — no subprocess is ever added to the hot path, and a check whose state
+file is absent (e.g. a config with no probes) costs a single `[ -f ]` test.
 
 `manifest.json` is written at the *end* of a successful sync, so a failed/partial
 sync never marks the environment fresh, and a second shell entering during an

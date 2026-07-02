@@ -101,6 +101,12 @@ Both only *read* the environment — they never run a command or write anything.
 Because their result depends on the host filesystem/PATH, treat them as an escape
 hatch: a config that branches on them is only as reproducible as what it probes.
 
+Probe results are recorded at sync time, and the shell hook re-checks them on
+every prompt (with plain builtins — `[ -e ]` / `command -v`, no subprocess), so
+creating the probed file or installing the binary auto-syncs on your next prompt
+just like a config edit does. (`which` detection is by presence; a binary that
+*moves* without a presence change is picked up by `tau status`/manual sync.)
+
 ## Tools and packages
 
 Declare tools/packages and `tau sync` installs them into `.taugres/` and adds

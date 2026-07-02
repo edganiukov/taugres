@@ -7,6 +7,8 @@ package shellhook
 import (
 	"fmt"
 	"strings"
+
+	"github.com/edganiukov/taugres/internal/state"
 )
 
 // SupportedShells lists shells with hook support.
@@ -27,11 +29,15 @@ func Hook(shell, tauBin string) (string, error) {
 }
 
 // posixHook returns a bash/zsh compatible hook. The shell-specific difference is
-// only in how the hook is wired to directory changes.
+// only in how the hook is wired to directory changes. The per-check staleness
+// fragments are spliced in from the state package so both the hook and Go stay
+// in sync as checks are added.
 func posixHook(shell, tauBin string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "_TAU_BIN=%s\n", singleQuote(tauBin))
-	b.WriteString(hookCommon)
+	body := strings.Replace(hookCommon, "__TAU_DETECT__\n", state.ShellDetect(state.Posix), 1)
+	body = strings.Replace(body, "__TAU_TOKEN__\n", state.ShellToken(state.Posix), 1)
+	b.WriteString(body)
 	switch shell {
 	case "zsh":
 		b.WriteString(zshWiring)
@@ -111,37 +117,21 @@ _tau_hook() {
   activate="$gen_dir/activate.$_TAU_SHELL"
   manifest="$gen_dir/manifest.json"
 
-  # Cheap staleness check using only shell builtins (-f/-nt/-d) — no subprocess
-  # on the common (unchanged) path. The mtime token is computed only when stale.
-  local stale= present=1 f
+  # Cheap staleness check using only shell builtins (-f/-nt/-d, command -v) — no
+  # subprocess on the common (unchanged) path. Each dimension's fragment is
+  # spliced in from the state package (__TAU_DETECT__); the retry token is built
+  # from matching fragments (__TAU_TOKEN__) only when stale.
+  local stale= present=1 probesig= f
   { [ -f "$activate" ] && [ -f "$manifest" ]; } || { stale=1; present=0; }
-  if [ -z "$stale" ] && [ -f "$gen_dir/sources" ]; then
-    while IFS= read -r f; do
-      [ -n "$f" ] && [ "$f" -nt "$manifest" ] && { stale=1; break; }
-    done < "$gen_dir/sources"
-  fi
-  if [ -f "$gen_dir/tooldirs" ]; then
-    while IFS= read -r f; do
-      [ -n "$f" ] && [ ! -d "$f" ] && { stale=1; present=0; break; }
-    done < "$gen_dir/tooldirs"
-  fi
+__TAU_DETECT__
 
   if [ -n "$stale" ] && [ -n "${_TAU_BIN:-}" ]; then
     # Token so a failing sync isn't retried until inputs change. Reading mtimes
     # runs stat, but only here on the (rare) stale path.
-    local newest m
-    newest="$(_tau_mtime "$(_tau_config_file "$proj")")"
-    [ -n "$newest" ] || newest=0
-    if [ -f "$gen_dir/sources" ]; then
-      while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        m="$(_tau_mtime "$f")"
-        [ -n "$m" ] && [ "$m" -gt "$newest" ] && newest="$m"
-      done < "$gen_dir/sources"
-    fi
-    local tok="$proj|$newest|$present"
-    if [ "$tok" != "${_TAU_TRIED:-}" ]; then
-      _TAU_TRIED="$tok"
+    local _tau_tok="$proj|$present"
+__TAU_TOKEN__
+    if [ "$_tau_tok" != "${_TAU_TRIED:-}" ]; then
+      _TAU_TRIED="$_tau_tok"
       # If this project's env is already active, tear it down with the matching
       # (current) deactivate script before regenerating, so removed vars/PATH do
       # not leak once the scripts change.

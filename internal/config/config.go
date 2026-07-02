@@ -31,7 +31,8 @@ const defaultMiseJobs = 16
 // loaded (for stale detection).
 type Result struct {
 	Plan          *model.Plan
-	LoadedModules []string // absolute paths of loaded .tg modules
+	LoadedModules []string      // absolute paths of loaded .tg modules
+	Probes        []model.Probe // exists()/which() observations, for stale detection
 }
 
 // Evaluate evaluates the active config file into a normalized plan. Imports may
@@ -57,7 +58,7 @@ func Evaluate(d *discover.Discovery) (*Result, error) {
 		return nil, err
 	}
 
-	return &Result{Plan: plan, LoadedModules: b.loadedList()}, nil
+	return &Result{Plan: plan, LoadedModules: b.loadedList(), Probes: b.probes}, nil
 }
 
 type loadEntry struct {
@@ -88,6 +89,10 @@ type builder struct {
 	hooks       []model.HookScript
 	loaded      map[string]bool
 	loadCache   map[string]*loadEntry
+
+	// probes records exists()/which() observations for stale detection.
+	probes    []model.Probe
+	probeSeen map[string]bool
 }
 
 func newBuilder(d *discover.Discovery) *builder {
@@ -98,6 +103,7 @@ func newBuilder(d *discover.Discovery) *builder {
 		sourceFuncs: map[string][]model.SourceFunc{},
 		loaded:      map[string]bool{},
 		loadCache:   map[string]*loadEntry{},
+		probeSeen:   map[string]bool{},
 		miseJobs:    defaultMiseJobs,
 	}
 }
@@ -193,7 +199,9 @@ func (b *builder) existsFn(_ *starlark.Thread, fn *starlark.Builtin, args starla
 		return nil, err
 	}
 	_, statErr := os.Stat(resolved)
-	return starlark.Bool(statErr == nil), nil
+	ok := statErr == nil
+	b.recordProbe("exists", resolved, boolResult(ok))
+	return starlark.Bool(ok), nil
 }
 
 // whichFn implements which(name): return the absolute path of an executable
@@ -209,9 +217,30 @@ func (b *builder) whichFn(_ *starlark.Thread, fn *starlark.Builtin, args starlar
 	}
 	path, err := exec.LookPath(name)
 	if err != nil {
+		b.recordProbe("which", name, "")
 		return starlark.None, nil
 	}
+	b.recordProbe("which", name, path)
 	return starlark.String(path), nil
+}
+
+// recordProbe remembers a host-state observation (deduped by kind+arg) so sync
+// can persist it for stale detection.
+func (b *builder) recordProbe(kind, arg, result string) {
+	key := kind + "\x00" + arg
+	if b.probeSeen[key] {
+		return
+	}
+	b.probeSeen[key] = true
+	b.probes = append(b.probes, model.Probe{Kind: kind, Arg: arg, Result: result})
+}
+
+// boolResult renders a probe boolean as the "1"/"0" recorded form.
+func boolResult(ok bool) string {
+	if ok {
+		return "1"
+	}
+	return "0"
 }
 
 func (b *builder) envFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

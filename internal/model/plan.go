@@ -57,6 +57,20 @@ type UvPackage struct {
 	Version string `json:"version"`
 }
 
+// Probe records one host-state observation made during evaluation
+// (exists(path) or which(name)) and the result at that time. Sync persists
+// these so the shell hook / staleness checks can notice when the observed state
+// changes and trigger a resync.
+//
+// Kind is "exists" or "which". Arg is the resolved absolute path (exists) or the
+// binary name (which). Result is "1"/"0" for exists, or the resolved path (or
+// "" when not found) for which.
+type Probe struct {
+	Kind   string `json:"kind"`
+	Arg    string `json:"arg"`
+	Result string `json:"result"`
+}
+
 // Plan is the fully normalized, resolved environment plan. All paths are
 // absolute. Renderers should be able to produce shell scripts from this struct
 // without further resolution.

@@ -433,6 +433,12 @@ func runSync(e *Env, args []string) int {
 		return syncFail("writing sources: %v", err)
 	}
 
+	// Record exists()/which() probe results so the hook/staleness checks resync
+	// when a probed file or binary changes state.
+	if err := state.WriteProbes(plan.StateDir, res.Probes); err != nil {
+		return syncFail("writing probes: %v", err)
+	}
+
 	// Record tool dirs (mise store bin dirs + project-local pip/npm bins) so the
 	// hook/staleness checks can detect if one is later removed (e.g. a mise
 	// version pruned, or `rm -rf .taugres/tools/pip`) and trigger a resync.
