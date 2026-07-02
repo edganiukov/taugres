@@ -80,7 +80,7 @@ func dispatch(e *Env, cmd string, rest []string) int {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprint(w, `tau — a fast per-directory shell environment tool
+	fmt.Fprint(w, `tau — a fast tool for reproducible, deterministic development environments
 
 Usage:
   tau init [--nested]        create workspace.tg (or project.tg)

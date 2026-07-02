@@ -1,15 +1,14 @@
 # tau (Taugres)
 
-A fast, per-directory shell environment tool. You describe how your shell should
-be configured for a directory in a Starlark config file (`workspace.tg`); `tau`
-generates shell activation scripts that a lightweight hook sources on `cd`. It
-also provisions tools and packages (via mise, pip, uv, and npm), pinned in a
-committed lockfile.
+A fast tool for managing reproducible, deterministic development environments.
+Starlark is used as a configuration language; `tau` generates shell activation
+scripts that a lightweight hook sources on `cd`. It also installs tools and
+packages (via mise, pip, uv, and npm), pinned in a committed lockfile.
 
 ## Install
 
 ```sh
-go build -o tau ./cmd/tau
+go install github.com/edganiukov/taugres/cmd/tau@latest
 ```
 
 **Requires [mise](https://mise.jdx.dev)** for tools/packages: install it with
@@ -41,8 +40,10 @@ environment and restores it when you leave. Example config:
 
 ```python
 project("my-app")
+
 shell.env("DATABASE_URL", "postgres://localhost/app")
 shell.alias("ll", "ls -lah")
+
 mise.tool(["node@22.11.0", "ripgrep"])
 uv.install(["ruff", "rich"])
 ```

@@ -5,7 +5,8 @@ working project name; the CLI binary is `tau`.
 
 ## What it is
 
-A per-directory development environment tool in the spirit of `direnv`, but
+A tool for managing reproducible, deterministic development environments, in the
+spirit of `direnv`, but
 Starlark-configured and able to provision tools/packages. When you `cd` into a
 project it configures your shell — environment variables, `PATH`, aliases, shell
 functions, activation hooks — and, on request, installs the tools and packages

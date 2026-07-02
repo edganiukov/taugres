@@ -1,4 +1,4 @@
-// Command tau is a fast per-directory shell environment tool.
+// Command tau manages reproducible, deterministic development environments.
 package main
 
 import (
