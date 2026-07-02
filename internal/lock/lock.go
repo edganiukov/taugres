@@ -49,6 +49,7 @@ func Load(projectRoot string) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var f File
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, err
@@ -65,6 +66,7 @@ func Load(projectRoot string) (*File, error) {
 	if f.Uv == nil {
 		f.Uv = map[string]Entry{}
 	}
+
 	return &f, nil
 }
 

@@ -321,20 +321,16 @@ func runSync(e *Env, args []string) int {
 		var restBinDirs []string
 		var wg sync.WaitGroup
 		if len(rest) > 0 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				installed, err := mise.Install(rest, plan.MiseJobs, rep.Stream("mise: "), installReport)
 				if err != nil {
 					addErr(err.Error())
 				}
 				restBinDirs = recordMise(installed)
-			}()
+			})
 		}
 		if len(plan.PipPackages) > 0 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				eff := make([]model.PipPackage, len(plan.PipPackages))
 				for i, p := range plan.PipPackages {
 					e, ok := lk.Pip[p.Name]
@@ -349,12 +345,10 @@ func runSync(e *Env, args []string) int {
 						lk.Pip[p.Name] = lock.Entry{Requested: plan.PipPackages[i].Version, Resolved: v}
 					}
 				}
-			}()
+			})
 		}
 		if len(plan.NpmPackages) > 0 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				eff := make([]model.NpmPackage, len(plan.NpmPackages))
 				for i, p := range plan.NpmPackages {
 					e, ok := lk.Npm[p.Name]
@@ -369,12 +363,10 @@ func runSync(e *Env, args []string) int {
 						lk.Npm[p.Name] = lock.Entry{Requested: plan.NpmPackages[i].Version, Resolved: v}
 					}
 				}
-			}()
+			})
 		}
 		if len(plan.UvPackages) > 0 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				eff := make([]model.UvPackage, len(plan.UvPackages))
 				for i, p := range plan.UvPackages {
 					e, ok := lk.Uv[p.Name]
@@ -389,7 +381,7 @@ func runSync(e *Env, args []string) int {
 						lk.Uv[p.Name] = lock.Entry{Requested: plan.UvPackages[i].Version, Resolved: v}
 					}
 				}
-			}()
+			})
 		}
 		wg.Wait()
 		miseBinDirs = append(toolchainBinDirs, restBinDirs...)
@@ -686,7 +678,7 @@ func ensureGitignore(projectRoot string) {
 	gi := filepath.Join(projectRoot, ".gitignore")
 	data, err := os.ReadFile(gi)
 	if err == nil {
-		if containsLine(string(data), ".taugres/") {
+		if slices.Contains(splitLines(string(data)), ".taugres/") {
 			return
 		}
 		f, err := os.OpenFile(gi, os.O_APPEND|os.O_WRONLY, 0o644)
@@ -700,15 +692,6 @@ func ensureGitignore(projectRoot string) {
 	if os.IsNotExist(err) {
 		_ = os.WriteFile(gi, []byte(".taugres/\n"), 0o644)
 	}
-}
-
-func containsLine(content, line string) bool {
-	for _, l := range splitLines(content) {
-		if l == line {
-			return true
-		}
-	}
-	return false
 }
 
 func splitLines(s string) []string {

@@ -20,6 +20,11 @@ import (
 	"github.com/edganiukov/taugres/internal/paths"
 )
 
+// defaultMiseJobs caps how many tools mise installs in parallel. A modest cap
+// avoids bursts of unauthenticated GitHub API calls (aqua/ubi backends) that
+// trigger rate limits; override with mise.jobs(n).
+const defaultMiseJobs = 16
+
 // Result is the output of evaluating a config, including the modules that were
 // loaded (for stale detection).
 type Result struct {
@@ -53,14 +58,9 @@ func Evaluate(d *discover.Discovery) (*Result, error) {
 	return &Result{Plan: plan, LoadedModules: b.loadedList()}, nil
 }
 
-func fileOptions() *syntax.FileOptions {
-	// Allow common ergonomic features in config files.
-	return &syntax.FileOptions{
-		Set:             true,
-		While:           false,
-		TopLevelControl: true,
-		GlobalReassign:  false,
-	}
+type loadEntry struct {
+	globals starlark.StringDict
+	err     error
 }
 
 // builder accumulates plan state during Starlark evaluation.
@@ -88,11 +88,6 @@ type builder struct {
 	loadCache   map[string]*loadEntry
 }
 
-type loadEntry struct {
-	globals starlark.StringDict
-	err     error
-}
-
 func newBuilder(d *discover.Discovery) *builder {
 	return &builder{
 		disc:        d,
@@ -104,11 +99,6 @@ func newBuilder(d *discover.Discovery) *builder {
 		miseJobs:    defaultMiseJobs,
 	}
 }
-
-// defaultMiseJobs caps how many tools mise installs in parallel. A modest cap
-// avoids bursts of unauthenticated GitHub API calls (aqua/ubi backends) that
-// trigger rate limits; override with mise.jobs(n).
-const defaultMiseJobs = 10
 
 func (b *builder) loadedList() []string {
 	out := make([]string, 0, len(b.loaded))
@@ -365,61 +355,6 @@ func (b *builder) uvInstallFn(_ *starlark.Thread, fn *starlark.Builtin, args sta
 	return starlark.None, nil
 }
 
-// nameVersion is a parsed tool/package spec.
-type nameVersion struct{ name, version string }
-
-// unpackSpecs accepts either a single "name@version" spec or a list of them
-// (bare "name" = latest), shared by mise.tool/pip.install/npm.install. Versions
-// use "@" uniformly in config; each manager translates to its native ref at
-// install time.
-func unpackSpecs(fnName string, args starlark.Tuple, kwargs []starlark.Tuple) ([]nameVersion, error) {
-	var spec starlark.Value
-	if err := starlark.UnpackArgs(fnName, args, kwargs, "spec", &spec); err != nil {
-		return nil, err
-	}
-	switch t := spec.(type) {
-	case starlark.String:
-		name, ver := splitSpec(string(t))
-		return []nameVersion{{name, ver}}, nil
-	case *starlark.List:
-		out := make([]nameVersion, 0, t.Len())
-		it := t.Iterate()
-		defer it.Done()
-		var e starlark.Value
-		for it.Next(&e) {
-			s, ok := starlark.AsString(e)
-			if !ok {
-				return nil, fmt.Errorf("%s: list entries must be strings, got %s", fnName, e.Type())
-			}
-			name, ver := splitSpec(s)
-			out = append(out, nameVersion{name, ver})
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("%s: expected a string or list of strings, got %s", fnName, spec.Type())
-	}
-}
-
-// splitSpec splits "name@version" on the last "@" whose index is > 0, so npm
-// scoped names like "@scope/pkg" (leading "@") stay intact. Bare names return
-// an empty version.
-func splitSpec(s string) (name, version string) {
-	if i := strings.LastIndex(s, "@"); i > 0 {
-		return s[:i], s[i+1:]
-	}
-	return s, ""
-}
-
-// hasMiseTool reports whether tools already declares a tool with the given name.
-func hasMiseTool(tools []model.MiseTool, name string) bool {
-	for _, t := range tools {
-		if t.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
 // resolvePath resolves a Taugres path against the repo root, returning a
 // friendly error on failure.
 func (b *builder) resolvePath(p string) (string, error) {
@@ -505,9 +440,8 @@ func (b *builder) finalize() (*model.Plan, error) {
 	p.NpmPackages = b.npmPackages
 	p.UvPackages = b.uvPackages
 
-	// pip/uv/npm run on a toolchain that tau provisions via mise, so declaring
-	// packages implies the matching runtime: pip/uv -> python, npm -> node, and
-	// uv also needs the uv binary. Add these implicitly unless already pinned.
+	// pip/uv/npm run on a toolchain that tau provisions via mise, so declaring packages implies the matching runtime:
+	// pip/uv -> python, npm -> node, and uv also needs the uv binary. Add these implicitly unless already pinned.
 	tools := append([]model.MiseTool{}, b.miseTools...)
 	if (len(b.pipPackages) > 0 || len(b.uvPackages) > 0) && !hasMiseTool(tools, "python") {
 		tools = append(tools, model.MiseTool{Name: "python"})
@@ -521,12 +455,10 @@ func (b *builder) finalize() (*model.Plan, error) {
 	p.MiseTools = tools
 	p.MiseJobs = b.miseJobs
 
-	// Tool bin directories are auto-prepended so their executables resolve first
-	// on PATH. pip and npm install into per-tool prefixes under
-	// <stateDir>/tools/{pip,npm} with deterministic paths, prepended here. mise
-	// tool bin dirs live in mise's store and are prepended at sync time (their
-	// versioned paths are only known after installation), the way `mise
-	// activate` exposes tools — no symlink/wrapper farm.
+	// Tool bin directories are auto-prepended so their executables resolve first on PATH. pip and npm install into
+	// per-tool prefixes under <stateDir>/tools/{pip,npm} with deterministic paths, prepended here. mise tool bin dirs
+	// live in mise's store and are prepended at sync time (their versioned paths are only known after installation),
+	// the way `mise activate` exposes tools — no symlink/wrapper farm.
 	var prepend []string
 	if len(b.pipPackages) > 0 {
 		p.PipDir = filepath.Join(p.StateDir, "tools", "pip")
@@ -547,6 +479,71 @@ func (b *builder) finalize() (*model.Plan, error) {
 	p.PathAppend = dedup(b.pathAppend)
 
 	return p, nil
+}
+
+// nameVersion is a parsed tool/package spec.
+type nameVersion struct{ name, version string }
+
+// unpackSpecs accepts either a single "name@version" spec or a list of them
+// (bare "name" = latest), shared by mise.tool/pip.install/npm.install. Versions
+// use "@" uniformly in config; each manager translates to its native ref at
+// install time.
+func unpackSpecs(fnName string, args starlark.Tuple, kwargs []starlark.Tuple) ([]nameVersion, error) {
+	var spec starlark.Value
+	if err := starlark.UnpackArgs(fnName, args, kwargs, "spec", &spec); err != nil {
+		return nil, err
+	}
+	switch t := spec.(type) {
+	case starlark.String:
+		name, ver := splitSpec(string(t))
+		return []nameVersion{{name, ver}}, nil
+	case *starlark.List:
+		out := make([]nameVersion, 0, t.Len())
+		it := t.Iterate()
+		defer it.Done()
+		var e starlark.Value
+		for it.Next(&e) {
+			s, ok := starlark.AsString(e)
+			if !ok {
+				return nil, fmt.Errorf("%s: list entries must be strings, got %s", fnName, e.Type())
+			}
+			name, ver := splitSpec(s)
+			out = append(out, nameVersion{name, ver})
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%s: expected a string or list of strings, got %s", fnName, spec.Type())
+	}
+}
+
+// splitSpec splits "name@version" on the last "@" whose index is > 0, so npm
+// scoped names like "@scope/pkg" (leading "@") stay intact. Bare names return
+// an empty version.
+func splitSpec(s string) (name, version string) {
+	if i := strings.LastIndex(s, "@"); i > 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
+}
+
+// hasMiseTool reports whether tools already declares a tool with the given name.
+func hasMiseTool(tools []model.MiseTool, name string) bool {
+	for _, t := range tools {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func fileOptions() *syntax.FileOptions {
+	// Allow common ergonomic features in config files.
+	return &syntax.FileOptions{
+		Set:             true,
+		While:           false,
+		TopLevelControl: true,
+		GlobalReassign:  false,
+	}
 }
 
 func dedup(in []string) []string {
