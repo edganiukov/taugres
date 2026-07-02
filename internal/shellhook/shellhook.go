@@ -168,6 +168,10 @@ _tau_hook() {
         unset _TAU_ACTIVE_ROOT
       fi
       ( cd "$proj" && "$_TAU_BIN" sync --if-stale )
+      # The sync may have regenerated the env; force the (re)activation below
+      # rather than trust activate's mtime, whose 1s granularity can miss a
+      # same-second resync.
+      unset _TAU_ACT_TOKEN
     fi
   fi
 

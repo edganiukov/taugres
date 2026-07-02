@@ -288,13 +288,12 @@ func TestBashHookResyncsOnProbeChange(t *testing.T) {
 
 	// Enter (TRIG unset), then create the probed file and prompt again: the hook
 	// must detect the exists() flip and auto-sync so TRIG becomes set.
-	// The `sleep 1` crosses a second boundary so the regenerated activate.bash
-	// has a newer mtime than the first activation (the hook keys reactivation on
-	// that mtime, which stat reports at 1s granularity).
+	// No sleep: the resync lands in the same wall-clock second as the first
+	// activation, so this also guards the fix for the mtime-granularity
+	// reactivation gap (the hook forces reactivation after a sync).
 	script := string(hb) + `
 prompt() { local c; for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done; }
 cd "` + repo + `"; prompt; echo "BEFORE TRIG=${TRIG:-unset}"
-sleep 1
 touch "` + repo + `/trigger"; prompt; echo "AFTER TRIG=${TRIG:-unset}"`
 	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", script)
 	cmd.Env = env

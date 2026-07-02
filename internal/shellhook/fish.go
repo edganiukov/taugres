@@ -154,6 +154,10 @@ function _tau_hook --on-variable PWD
                 $_TAU_BIN sync --if-stale
                 popd
             end
+            # The sync may have regenerated the env; force the (re)activation
+            # below rather than trust activate's mtime, whose 1s granularity can
+            # miss a same-second resync.
+            set -e _TAU_ACT_TOKEN
         end
     end
 
