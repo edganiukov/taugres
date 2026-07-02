@@ -112,13 +112,13 @@ func TestSyncPrependsMiseToolBinDir(t *testing.T) {
 	if !strings.Contains(string(act), wantPath) {
 		t.Errorf("activate.bash does not prepend %s:\n%s", wantPath, act)
 	}
-	// The tool dir is recorded for staleness checks.
-	tooldirs, err := os.ReadFile(filepath.Join(dir, ".taugres", "gen", "tooldirs"))
+	// The tool dir is recorded in the manifest for staleness checks.
+	manifest, err := os.ReadFile(filepath.Join(dir, ".taugres", "gen", "manifest"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(tooldirs), wantPath) {
-		t.Errorf("tooldirs missing %s:\n%s", wantPath, tooldirs)
+	if !strings.Contains(string(manifest), "tooldir:"+wantPath) {
+		t.Errorf("manifest missing tooldir %s:\n%s", wantPath, manifest)
 	}
 }
 

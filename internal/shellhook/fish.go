@@ -3,19 +3,14 @@ package shellhook
 import (
 	"fmt"
 	"strings"
-
-	"github.com/edganiukov/taugres/internal/state"
 )
 
 // fishHook returns the fish shell hook. It mirrors the bash/zsh hook logic but
-// in fish syntax, wired to directory changes via `--on-variable PWD`. The
-// per-check staleness fragments are spliced in from the state package.
+// in fish syntax, wired to directory changes via `--on-variable PWD`.
 func fishHook(tauBin string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "set -g _TAU_BIN %s\n", fishSingleQuote(tauBin))
-	body := strings.Replace(fishHookBody, "__TAU_DETECT__\n", state.ShellDetect(state.Fish), 1)
-	body = strings.Replace(body, "__TAU_TOKEN__\n", state.ShellToken(state.Fish), 1)
-	b.WriteString(body)
+	b.WriteString(fishHookBody)
 	return b.String()
 }
 
@@ -81,25 +76,72 @@ function _tau_hook --on-variable PWD
 
     set -l gen_dir (_tau_gen_dir "$proj")
     set -l activate "$gen_dir/activate.fish"
-    set -l manifest "$gen_dir/manifest.json"
+    set -l manifest "$gen_dir/manifest"
 
     # Cheap staleness check using only builtins (-f/-nt/-d, command -s) — no
-    # subprocess on the common (unchanged) path. Each dimension's fragment is
-    # spliced in from the state package (__TAU_DETECT__); the retry token is
-    # built from matching fragments (__TAU_TOKEN__) only when stale.
+    # subprocess on the common (unchanged) path. One pass over the single
+    # manifest, dispatched by line tag: input:<hash>:<path>, tooldir:<path>,
+    # probe:<kind>|<arg>|<result>.
     set -l stale
     set -l present 1
     set -l probesig ""
     if test ! -f "$activate"; or test ! -f "$manifest"
         set stale 1; set present 0
     end
-__TAU_DETECT__
+    if test -f "$manifest"
+        while read -l line
+            switch "$line"
+                case 'input:*'
+                    set -l p (string replace -r '^input:[^:]*:' '' -- $line)
+                    if test -n "$p"; and test "$p" -nt "$manifest"
+                        set stale 1
+                    end
+                case 'tooldir:*'
+                    set -l d (string replace -r '^tooldir:' '' -- $line)
+                    if test -n "$d"; and test ! -d "$d"
+                        set stale 1
+                        set present 0
+                    end
+                case 'probe:*'
+                    set -l spec (string replace -r '^probe:' '' -- $line)
+                    set -l kind (string split -m1 '|' -- $spec)[1]
+                    set -l tail (string split -m1 '|' -- $spec)[2]
+                    set -l arg (string split -r -m1 '|' -- $tail)[1]
+                    set -l rec (string split -r -m1 '|' -- $tail)[2]
+                    set -l now 0
+                    set -l want 0
+                    switch "$kind"
+                        case exists
+                            test -e "$arg"; and set now 1
+                            test "$rec" = 1; and set want 1
+                        case which
+                            command -s "$arg" >/dev/null 2>&1; and set now 1
+                            test -n "$rec"; and set want 1
+                    end
+                    set probesig "$probesig|$now"
+                    test "$now" = "$want"; or set stale 1
+            end
+        end <"$manifest"
+    end
 
     if test -n "$stale"; and test -n "$_TAU_BIN"
-        # Token so a failing sync isn't retried until inputs change; reading
-        # mtimes runs stat, but only here on the (rare) stale path.
-        set -l _tau_tok "$proj|$present"
-__TAU_TOKEN__
+        # Retry token so a failing sync isn't retried until inputs change;
+        # reading mtimes runs stat, but only here on the (rare) stale path. The
+        # probe signal is folded in so a genuine probe flip forces one resync.
+        set -l newest (_tau_mtime (_tau_config_file "$proj"))
+        test -n "$newest"; or set newest 0
+        while read -l line
+            switch "$line"
+                case 'input:*'
+                    set -l p (string replace -r '^input:[^:]*:' '' -- $line)
+                    test -n "$p"; or continue
+                    set -l m (_tau_mtime "$p")
+                    if test -n "$m"; and test "$m" -gt "$newest"
+                        set newest $m
+                    end
+            end
+        end <"$manifest"
+        set -l _tau_tok "$proj|$present|$newest|$probesig"
         if test "$_tau_tok" != "$_TAU_TRIED"
             set -g _TAU_TRIED "$_tau_tok"
             # Tear down this project's active env with the matching deactivate

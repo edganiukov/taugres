@@ -24,6 +24,9 @@ import (
 // — the venv exists and each package's recorded spec is unchanged and resolved —
 // so Install (and its network access) can be skipped.
 func Fresh(pkgs []model.UvPackage, venvDir string, locked map[string]lock.Entry) bool {
+	if len(pkgs) == 0 {
+		return true // nothing declared -> nothing to install
+	}
 	if !toolenv.IsDir(BinDir(venvDir)) {
 		return false
 	}

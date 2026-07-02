@@ -27,6 +27,9 @@ import (
 // inside the venv is not inspected; a wiped venv dir is caught by the tooldirs
 // staleness check, which forces a full sync.
 func Fresh(pkgs []model.PipPackage, venvDir string, locked map[string]lock.Entry) bool {
+	if len(pkgs) == 0 {
+		return true // nothing declared -> nothing to install
+	}
 	if !toolenv.IsDir(BinDir(venvDir)) {
 		return false
 	}

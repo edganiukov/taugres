@@ -28,6 +28,9 @@ import (
 // — the prefix's node_modules exists and each package's recorded spec is
 // unchanged and resolved — so Install (and its registry access) can be skipped.
 func Fresh(pkgs []model.NpmPackage, npmDir string, locked map[string]lock.Entry) bool {
+	if len(pkgs) == 0 {
+		return true // nothing declared -> nothing to install
+	}
 	if !toolenv.IsDir(filepath.Join(npmDir, "lib", "node_modules")) {
 		return false
 	}

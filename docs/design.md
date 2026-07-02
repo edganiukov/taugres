@@ -94,8 +94,7 @@ project/
   taugres/lib/*.tg      # optional committed Starlark helper modules
   service-a/project.tg  # optional nested project config
   .taugres/             # generated/local, git-ignored as a whole
-    gen/                # activate/deactivate.{bash,zsh,fish}, manifest.json,
-                        # sources, tooldirs, probes
+    gen/                # activate/deactivate.{bash,zsh,fish} + manifest
     tools/
       pip/              # project-local pip virtualenv
       npm/              # project-local npm prefix
@@ -312,28 +311,34 @@ On each prompt the hook:
 
 ### Staleness checks
 
-Staleness is a set of independent dimensions, each recording state under
-`.taugres/gen/` at sync time and detecting drift later. They are defined once in
-`internal/state` (`checks`) and drive both the Go path and the shell hook:
+Staleness is a set of independent dimensions, all recorded in one file —
+`.taugres/gen/manifest` — written at the end of a sync. It is a greppable,
+line-based format so the shell hook reads it with pure builtins (no JSON parse,
+no subprocess) while Go reads the same file:
 
-| Check | Recorded file | Drift when… |
-| --- | --- | --- |
-| sources | `sources` | a config input (the config file, a `load(...)` module, a `shell.fn`/`shell.hook` file) is newer than `manifest.json` |
-| tooldirs | `tooldirs` | a recorded tool bin dir (mise store, pip/uv venv, npm prefix) is missing |
-| probes | `probes` | an `exists()`/`which()` result changed (a probed file appeared/vanished, a binary was installed/removed) |
+```
+input:<sha256>:<abs-path>     a config input (config file, load(...) module, shell.fn/shell.hook file)
+tooldir:<abs-path>            a tool bin dir that must exist
+probe:<kind>|<arg>|<result>   an exists()/which() observation
+```
 
-Each check contributes a Go evaluator, run **concurrently** in `NeedsSync` /
-`CheckStale`, and two pure-shell fragments spliced into the hook: a *detect*
-fragment (builtins only, every prompt, sets `stale`) and a *token* fragment (only
-on the stale path, may `stat`, feeds the `_TAU_TRIED` retry token so a genuine
-change forces exactly one resync). Adding a new dimension is one entry in
-`checks` — no subprocess is ever added to the hot path, and a check whose state
-file is absent (e.g. a config with no probes) costs a single `[ -f ]` test.
+| Dimension | Drift when… |
+| --- | --- |
+| input | a config input's mtime is newer than the manifest (hook) or its content hash changed (`tau status`) |
+| tooldir | a recorded tool bin dir (mise store, pip/uv venv, npm prefix) is missing |
+| probe | an `exists()`/`which()` result changed (a probed file appeared/vanished, a binary was installed/removed) |
 
-`manifest.json` is written at the *end* of a successful sync, so a failed/partial
-sync never marks the environment fresh, and a second shell entering during an
-in-progress sync blocks on the sync lock rather than racing to a half-written
-env.
+The manifest's own mtime is the "last synced" anchor. On each prompt the hook
+makes **one pass** over the file, dispatching by line tag with builtins only
+(`-nt`, `-d`, `command -v`); the Go evaluators (`NeedsSync`) run the same three
+dimensions **concurrently**. Only on the stale path does it read mtimes (`stat`)
+to build the `_TAU_TRIED` retry token, into which the probe signal is folded so a
+genuine change forces exactly one resync (no storm). Adding a dimension is a new
+line tag plus a case in the dispatch.
+
+Because everything lives in one file written last, a failed/partial sync never
+marks the environment fresh, and a second shell entering during an in-progress
+sync blocks on the sync lock rather than racing to a half-written env.
 
 Critically, the hook **never sources an in-repo script for the trust decision**;
 it delegates activation to `tau activate`, which refuses to emit anything for an
@@ -426,9 +431,9 @@ freshness check — `mise.Fresh`, `pip.Fresh`, `npm.Fresh`, `uv.Fresh` (in the
 tool packages, next to their installers) — and its install is skipped entirely,
 touching no network, when its declared set is unchanged from the lock and its
 artifacts are present. This is a distinct *group* from the env-trigger checks
-(sources/tooldirs/probes in `internal/state`, which decide whether to sync at
-all): the env checks decide *whether* to sync; the tool checks decide *what work*
-the sync does. `--update` forces every manager. To keep the mise check offline
+(the input/tooldir/probe dimensions in `internal/state`, which decide whether to
+sync at all): the env checks decide *whether* to sync; the tool checks decide
+*what work* the sync does. `--update` forces every manager. To keep the mise check offline
 (no `mise where`), the resolved store bin dir is cached in each mise lock entry
 (`binDir`); pip/uv/npm bin dirs are deterministic project-local paths.
 

@@ -82,7 +82,7 @@ func TestFullSyncFlow(t *testing.T) {
 	if code, _, errOut := run(t, dir, "sync"); code != 0 {
 		t.Fatalf("sync failed: %s", errOut)
 	}
-	for _, f := range []string{"activate.bash", "activate.zsh", "deactivate.bash", "deactivate.zsh", "manifest.json"} {
+	for _, f := range []string{"activate.bash", "activate.zsh", "deactivate.bash", "deactivate.zsh", "manifest"} {
 		p := filepath.Join(dir, ".taugres", "gen", f)
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("missing generated file %s", f)

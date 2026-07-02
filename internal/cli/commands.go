@@ -271,19 +271,26 @@ func runSync(e *Env, args []string) int {
 	// changed or its artifacts are missing (or --update forces it). A sync
 	// triggered for an unrelated reason therefore does no tool work and hits no
 	// network. --update re-resolves unpinned entries, so it forces every manager.
+	// Fresh() is true for an empty set, so these read as plain "is it stale?".
 	force := *update
+	miseStale := force || !mise.Fresh(plan.MiseTools, lk.Mise)
+	pipStale := force || !pip.Fresh(plan.PipPackages, plan.PipDir, lk.Pip)
+	npmStale := force || !npm.Fresh(plan.NpmPackages, plan.NpmDir, lk.Npm)
+	uvStale := force || !uv.Fresh(plan.UvPackages, plan.UvDir, lk.Uv)
+
 	var miseBinDirs, toolchainBinDirs, restBinDirs []string
 	miseReinstalled := false
 	var wg sync.WaitGroup
 
-	if len(plan.MiseTools) > 0 && !mise.Available() {
+	switch {
+	case len(plan.MiseTools) > 0 && !mise.Available():
 		addErr("mise is required to install tools but is not installed — install it with `curl https://mise.run | sh` (see https://mise.jdx.dev; the mise binary on PATH is all tau needs)")
-	} else if len(plan.MiseTools) > 0 && !force && mise.Fresh(plan.MiseTools, lk.Mise) {
+	case !miseStale:
 		// Present and unchanged: skip mise entirely, reuse the cached store bin
 		// dirs for PATH (and as the toolchain for pip/uv/npm).
 		miseBinDirs = mise.CachedBinDirs(plan.MiseTools, lk.Mise)
 		toolchainBinDirs = miseBinDirs
-	} else if len(plan.MiseTools) > 0 {
+	default:
 		miseReinstalled = true
 		// Effective versions (locked unless --update / spec changed).
 		effMise := make([]model.MiseTool, len(plan.MiseTools))
@@ -343,7 +350,7 @@ func runSync(e *Env, args []string) int {
 	// pip/npm/uv install concurrently, each gated by its own freshness check.
 	// They use the toolchain bin dirs (fresh install or cached) to find
 	// python/node/uv, so they never depend on other mise tools.
-	if len(plan.PipPackages) > 0 && (force || !pip.Fresh(plan.PipPackages, plan.PipDir, lk.Pip)) {
+	if pipStale {
 		wg.Go(func() {
 			eff := make([]model.PipPackage, len(plan.PipPackages))
 			for i, p := range plan.PipPackages {
@@ -361,7 +368,7 @@ func runSync(e *Env, args []string) int {
 			}
 		})
 	}
-	if len(plan.NpmPackages) > 0 && (force || !npm.Fresh(plan.NpmPackages, plan.NpmDir, lk.Npm)) {
+	if npmStale {
 		wg.Go(func() {
 			eff := make([]model.NpmPackage, len(plan.NpmPackages))
 			for i, p := range plan.NpmPackages {
@@ -379,7 +386,7 @@ func runSync(e *Env, args []string) int {
 			}
 		})
 	}
-	if len(plan.UvPackages) > 0 && (force || !uv.Fresh(plan.UvPackages, plan.UvDir, lk.Uv)) {
+	if uvStale {
 		wg.Go(func() {
 			eff := make([]model.UvPackage, len(plan.UvPackages))
 			for i, p := range plan.UvPackages {
@@ -439,32 +446,13 @@ func runSync(e *Env, args []string) int {
 		}
 	}
 
-	// Record the config inputs (config file, loaded modules, fn.source files) so
-	// the hook/staleness checks re-sync when any of them changes — not just the
-	// active config file.
-	sources := append([]string{plan.ConfigPath}, res.LoadedModules...)
-	sources = append(sources, sourceFiles(plan)...)
-	if err := state.WriteSources(plan.StateDir, sources); err != nil {
-		return syncFail("writing sources: %v", err)
-	}
-
-	// Record exists()/which() probe results so the hook/staleness checks resync
-	// when a probed file or binary changes state.
-	if err := state.WriteProbes(plan.StateDir, res.Probes); err != nil {
-		return syncFail("writing probes: %v", err)
-	}
-
-	// Record tool dirs (mise store bin dirs + project-local pip/npm bins) so the
-	// hook/staleness checks can detect if one is later removed (e.g. a mise
-	// version pruned, or `rm -rf .taugres/tools/pip`) and trigger a resync.
+	// Write the manifest last so it is the newest file: the staleness checks
+	// treat any recorded input newer than the manifest as "changed". It records
+	// config inputs (config file, loaded modules, fn/hook source files), the tool
+	// bin dirs that must exist, and the exists()/which() probe results — so a
+	// changed input, a removed tool dir, or a flipped probe all trigger a resync.
 	toolDirs := append(append([]string{}, miseBinDirs...), plan.ProjectToolBinDirs()...)
-	if err := state.WriteToolDirs(plan.StateDir, toolDirs); err != nil {
-		return syncFail("writing tool dirs: %v", err)
-	}
-
-	// Write the manifest last so it is the newest file: the staleness check
-	// treats any recorded source newer than the manifest as "changed".
-	m, err := buildManifest(res, render.SupportedShells)
+	m, err := buildManifest(res, toolDirs)
 	if err != nil {
 		return syncFail("building manifest: %v", err)
 	}
@@ -507,62 +495,34 @@ func displayName(plan *model.Plan) string {
 	return filepath.Base(plan.ProjectRoot)
 }
 
-func buildManifest(res *config.Result, shells []string) (*state.Manifest, error) {
+// buildManifest hashes every config input (config file, loaded modules, fn/hook
+// source files) and pairs them with the tool dirs and probe results into the
+// single manifest.
+func buildManifest(res *config.Result, toolDirs []string) (*state.Manifest, error) {
 	plan := res.Plan
-	configHash, err := state.HashFile(plan.ConfigPath)
-	if err != nil {
+	inputs := map[string]string{}
+	add := func(path string) error {
+		h, err := state.HashFile(path)
+		if err != nil {
+			return err
+		}
+		inputs[path] = h
+		return nil
+	}
+	if err := add(plan.ConfigPath); err != nil {
 		return nil, err
 	}
-	moduleHashes := map[string]string{}
 	for _, m := range res.LoadedModules {
-		h, err := state.HashFile(m)
-		if err != nil {
+		if err := add(m); err != nil {
 			return nil, err
 		}
-		moduleHashes[m] = h
 	}
-	sourceHashes := map[string]string{}
 	for _, f := range sourceFiles(plan) {
-		h, err := state.HashFile(f)
-		if err != nil {
+		if err := add(f); err != nil {
 			return nil, err
 		}
-		sourceHashes[f] = h
 	}
-	var tools map[string]string
-	if len(plan.MiseTools) > 0 {
-		tools = map[string]string{}
-		for _, t := range plan.MiseTools {
-			tools[t.Name] = t.Version
-		}
-	}
-	var pipPkgs map[string]string
-	if len(plan.PipPackages) > 0 {
-		pipPkgs = map[string]string{}
-		for _, p := range plan.PipPackages {
-			pipPkgs[p.Name] = p.Version
-		}
-	}
-	var npmPkgs map[string]string
-	if len(plan.NpmPackages) > 0 {
-		npmPkgs = map[string]string{}
-		for _, p := range plan.NpmPackages {
-			npmPkgs[p.Name] = p.Version
-		}
-	}
-	return &state.Manifest{
-		TauVersion:   Version,
-		ConfigPath:   plan.ConfigPath,
-		RepoRoot:     plan.RepoRoot,
-		ProjectRoot:  plan.ProjectRoot,
-		ConfigHash:   configHash,
-		ModuleHashes: moduleHashes,
-		SourceHashes: sourceHashes,
-		Shells:       state.SortedShells(shells),
-		MiseTools:    tools,
-		PipPackages:  pipPkgs,
-		NpmPackages:  npmPkgs,
-	}, nil
+	return &state.Manifest{Inputs: inputs, ToolDirs: toolDirs, Probes: res.Probes}, nil
 }
 
 // gcTools removes packages and lock entries that were dropped from the config.

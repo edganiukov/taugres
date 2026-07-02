@@ -14,9 +14,11 @@ func TestHookContainsAutoSync(t *testing.T) {
 		"_TAU_BIN='/usr/local/bin/tau'",
 		"sync --if-stale",
 		`activate "$_TAU_SHELL"`, // activation delegated to `tau activate` (trust gate)
-		`-nt "$manifest"`,        // staleness: a source newer than the manifest
-		`"$gen_dir/sources"`,     // sources (config + modules + fn.source) tracked
-		`"$gen_dir/tooldirs"`,    // tool dirs tracked
+		`-nt "$manifest"`,        // staleness: an input newer than the manifest
+		`"$gen_dir/manifest"`,    // single tagged state file
+		"input:*",                // config inputs tracked
+		"tooldir:*",              // tool dirs tracked
+		"probe:*",                // exists()/which() probes tracked
 		"_TAU_TRIED",             // per-shell storm guard
 		"_TAU_ACT_TOKEN",         // re-activate when the generated env changes
 		"_tau_hook",
@@ -62,7 +64,7 @@ func TestHookFishUsesOnVariablePwd(t *testing.T) {
 		"sync --if-stale",
 		"activate fish",
 		`-nt "$manifest"`,
-		"$gen_dir/sources",
+		"$gen_dir/manifest",
 		"_TAU_TRIED",
 		"_TAU_ACT_TOKEN",
 	} {

@@ -7,8 +7,6 @@ package shellhook
 import (
 	"fmt"
 	"strings"
-
-	"github.com/edganiukov/taugres/internal/state"
 )
 
 // SupportedShells lists shells with hook support.
@@ -29,15 +27,11 @@ func Hook(shell, tauBin string) (string, error) {
 }
 
 // posixHook returns a bash/zsh compatible hook. The shell-specific difference is
-// only in how the hook is wired to directory changes. The per-check staleness
-// fragments are spliced in from the state package so both the hook and Go stay
-// in sync as checks are added.
+// only in how the hook is wired to directory changes.
 func posixHook(shell, tauBin string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "_TAU_BIN=%s\n", singleQuote(tauBin))
-	body := strings.Replace(hookCommon, "__TAU_DETECT__\n", state.ShellDetect(state.Posix), 1)
-	body = strings.Replace(body, "__TAU_TOKEN__\n", state.ShellToken(state.Posix), 1)
-	b.WriteString(body)
+	b.WriteString(hookCommon)
 	switch shell {
 	case "zsh":
 		b.WriteString(zshWiring)
@@ -115,21 +109,55 @@ _tau_hook() {
 
   gen_dir="$(_tau_gen_dir "$proj")"
   activate="$gen_dir/activate.$_TAU_SHELL"
-  manifest="$gen_dir/manifest.json"
+  manifest="$gen_dir/manifest"
 
   # Cheap staleness check using only shell builtins (-f/-nt/-d, command -v) — no
-  # subprocess on the common (unchanged) path. Each dimension's fragment is
-  # spliced in from the state package (__TAU_DETECT__); the retry token is built
-  # from matching fragments (__TAU_TOKEN__) only when stale.
-  local stale= present=1 probesig= f
+  # subprocess on the common (unchanged) path. One pass over the single manifest,
+  # dispatched by line tag: input:<hash>:<path>, tooldir:<path>,
+  # probe:<kind>|<arg>|<result>.
+  local stale= present=1 probesig= line rest p d kind arg rec now want
   { [ -f "$activate" ] && [ -f "$manifest" ]; } || { stale=1; present=0; }
-__TAU_DETECT__
+  if [ -f "$manifest" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        input:*)
+          p=${line#input:}; p=${p#*:}
+          [ -n "$p" ] && [ "$p" -nt "$manifest" ] && stale=1 ;;
+        tooldir:*)
+          d=${line#tooldir:}
+          [ -n "$d" ] && [ ! -d "$d" ] && { stale=1; present=0; } ;;
+        probe:*)
+          rest=${line#probe:}
+          kind=${rest%%|*}; rest=${rest#*|}; arg=${rest%|*}; rec=${rest##*|}
+          case "$kind" in
+            exists) if [ -e "$arg" ]; then now=1; else now=0; fi; want=$rec ;;
+            which)  if command -v "$arg" >/dev/null 2>&1; then now=1; else now=0; fi
+                    if [ -n "$rec" ]; then want=1; else want=0; fi ;;
+            *) now=0; want=0 ;;
+          esac
+          probesig="$probesig|$now"
+          [ "$now" = "$want" ] || stale=1 ;;
+      esac
+    done < "$manifest"
+  fi
 
   if [ -n "$stale" ] && [ -n "${_TAU_BIN:-}" ]; then
-    # Token so a failing sync isn't retried until inputs change. Reading mtimes
-    # runs stat, but only here on the (rare) stale path.
-    local _tau_tok="$proj|$present"
-__TAU_TOKEN__
+    # Retry token so a failing sync isn't retried until inputs change. Reading
+    # mtimes runs stat, but only here on the (rare) stale path; the probe signal
+    # is folded in so a genuine probe flip forces exactly one resync.
+    local newest m
+    newest="$(_tau_mtime "$(_tau_config_file "$proj")")"
+    [ -n "$newest" ] || newest=0
+    while IFS= read -r line; do
+      case "$line" in
+        input:*)
+          p=${line#input:}; p=${p#*:}
+          [ -n "$p" ] || continue
+          m="$(_tau_mtime "$p")"
+          [ -n "$m" ] && [ "$m" -gt "$newest" ] && newest="$m" ;;
+      esac
+    done < "$manifest"
+    local _tau_tok="$proj|$present|$newest|$probesig"
     if [ "$_tau_tok" != "${_TAU_TRIED:-}" ]; then
       _TAU_TRIED="$_tau_tok"
       # If this project's env is already active, tear it down with the matching
