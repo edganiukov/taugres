@@ -363,7 +363,9 @@ It is a **hard dependency** for any tool/package: `pip` and `npm` run on the
 implies an implicit `mise.tool("python")`/`mise.tool("node")`. mise is a
 documented prerequisite (install: `curl https://mise.run | sh`), not something
 tau bootstraps — and only the `mise` binary on PATH is needed, since tau uses
-mise's store directly and never relies on `mise activate`.
+mise's store directly and never relies on `mise activate`. tau caps install
+parallelism at `mise.jobs(n)` (default 10) via `mise install --jobs n`, to limit
+bursts of unauthenticated GitHub API calls from the aqua/ubi backends.
 
 Tools are exposed the way **`mise activate`** does — by prepending each tool's
 real install bin dir (e.g. `~/.local/share/mise/installs/node/22.11.0/bin`) to

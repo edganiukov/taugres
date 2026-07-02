@@ -138,7 +138,9 @@ mise.tool([
 
 `@version` still applies (`"cargo:ripgrep@14.1.1"`). Backends that hit the GitHub
 API (`ubi`/`aqua`/github releases) need `GITHUB_TOKEN`/`MISE_GITHUB_TOKEN` set to
-avoid unauthenticated rate limits.
+avoid unauthenticated rate limits. tau also caps how many tools mise installs in
+parallel — default 10, override with `mise.jobs(n)` — which passes `--jobs n` to
+`mise install` and helps avoid bursts of unauthenticated API calls.
 
 **mise is a hard dependency** for tools/packages: `pip`/`uv`/`npm` run on the
 `python`/`node` that mise provisions (declaring `pip.install`/`uv.install`/

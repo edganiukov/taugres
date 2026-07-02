@@ -308,7 +308,7 @@ func runSync(e *Env, args []string) int {
 
 		var toolchainBinDirs []string
 		if len(toolchain) > 0 {
-			installed, err := mise.Install(toolchain, rep.Stream("mise: "), installReport)
+			installed, err := mise.Install(toolchain, plan.MiseJobs, rep.Stream("mise: "), installReport)
 			if err != nil {
 				addErr(err.Error())
 			}
@@ -324,7 +324,7 @@ func runSync(e *Env, args []string) int {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				installed, err := mise.Install(rest, rep.Stream("mise: "), installReport)
+				installed, err := mise.Install(rest, plan.MiseJobs, rep.Stream("mise: "), installReport)
 				if err != nil {
 					addErr(err.Error())
 				}

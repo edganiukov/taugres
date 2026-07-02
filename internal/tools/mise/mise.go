@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/edganiukov/taugres/internal/model"
@@ -40,11 +41,17 @@ func ref(t model.MiseTool) string {
 }
 
 // install runs `mise install ref...` for all tools in one command, so mise can
-// resolve and download them in parallel. When out is non-nil, mise's raw output
-// is written to it live (the caller prefixes lines); it is also captured so a
-// failure can surface the output in the error.
-func install(refs []string, out io.Writer) error {
-	cmd := exec.Command(Binary, append([]string{"install"}, refs...)...)
+// resolve and download them in parallel. jobs caps that parallelism (--jobs);
+// <= 0 leaves it to mise. When out is non-nil, mise's raw output is written to
+// it live (the caller prefixes lines); it is also captured so a failure can
+// surface the output in the error.
+func install(refs []string, jobs int, out io.Writer) error {
+	args := []string{"install"}
+	if jobs > 0 {
+		args = append(args, "--jobs", strconv.Itoa(jobs))
+	}
+	args = append(args, refs...)
+	cmd := exec.Command(Binary, args...)
 	return toolenv.Run(cmd, out, outputPrefix, "mise install "+strings.Join(refs, " "))
 }
 
@@ -107,7 +114,7 @@ type Installed struct {
 // single mise invocation so downloads run in parallel, then returns per tool
 // the resolved concrete version and bin dir. When out is non-nil, mise's output
 // is streamed to it live.
-func Install(tools []model.MiseTool, out io.Writer, report Reporter) ([]Installed, error) {
+func Install(tools []model.MiseTool, jobs int, out io.Writer, report Reporter) ([]Installed, error) {
 	if len(tools) == 0 {
 		return nil, nil
 	}
@@ -124,12 +131,13 @@ func Install(tools []model.MiseTool, out io.Writer, report Reporter) ([]Installe
 		finish = report(strings.Join(refs, " "))
 	}
 	// Fast path: install everything in one invocation so downloads run in
-	// parallel. If that fails (e.g. one bad ref, or a rate-limited backend),
-	// fall back to installing each tool on its own so a single bad tool does not
-	// prevent the others — critically the pip/npm toolchain — from landing.
-	if batchErr := install(refs, out); batchErr != nil {
+	// parallel (capped at jobs). If that fails (e.g. one bad ref, or a
+	// rate-limited backend), fall back to installing each tool on its own so a
+	// single bad tool does not prevent the others — critically the pip/npm
+	// toolchain — from landing.
+	if batchErr := install(refs, jobs, out); batchErr != nil {
 		for _, t := range tools {
-			_ = install([]string{ref(t)}, out)
+			_ = install([]string{ref(t)}, jobs, out)
 		}
 	}
 

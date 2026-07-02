@@ -90,6 +90,9 @@ type Plan struct {
 	// MiseTools declared with mise.tool(...), in declaration order.
 	MiseTools []MiseTool `json:"miseTools"`
 
+	// MiseJobs caps how many tools mise installs in parallel (mise.jobs(n)).
+	MiseJobs int `json:"miseJobs,omitempty"`
+
 	// PipPackages declared with pip.install(...), in declaration order.
 	PipPackages []PipPackage `json:"pipPackages"`
 

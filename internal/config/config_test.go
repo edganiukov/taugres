@@ -196,6 +196,26 @@ func TestToolSpecRejectsSecondArg(t *testing.T) {
 	}
 }
 
+func TestMiseJobs(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	// Default is 10 when mise.jobs is not called.
+	testutil.WriteFile(t, dir, "workspace.tg", `project("x")`)
+	if got := evalWorkspace(t, dir).Plan.MiseJobs; got != 10 {
+		t.Errorf("default MiseJobs = %d, want 10", got)
+	}
+	// Overridable.
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nmise.jobs(3)\n")
+	if got := evalWorkspace(t, dir).Plan.MiseJobs; got != 3 {
+		t.Errorf("MiseJobs = %d, want 3", got)
+	}
+	// Must be >= 1.
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nmise.jobs(0)\n")
+	d, _ := discover.Discover(dir)
+	if _, err := Evaluate(d); err == nil {
+		t.Error("expected error for mise.jobs(0)")
+	}
+}
+
 func TestMiseToolsRecorded(t *testing.T) {
 	dir := testutil.TempWorkspace(t)
 	testutil.WriteFile(t, dir, "workspace.tg", `

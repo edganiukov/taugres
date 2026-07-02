@@ -76,6 +76,7 @@ type builder struct {
 	pathAppend  []string
 
 	miseTools   []model.MiseTool
+	miseJobs    int
 	pipPackages []model.PipPackage
 	npmPackages []model.NpmPackage
 	uvPackages  []model.UvPackage
@@ -100,8 +101,14 @@ func newBuilder(d *discover.Discovery) *builder {
 		sourceFuncs: map[string][]model.SourceFunc{},
 		loaded:      map[string]bool{},
 		loadCache:   map[string]*loadEntry{},
+		miseJobs:    defaultMiseJobs,
 	}
 }
+
+// defaultMiseJobs caps how many tools mise installs in parallel. A modest cap
+// avoids bursts of unauthenticated GitHub API calls (aqua/ubi backends) that
+// trigger rate limits; override with mise.jobs(n).
+const defaultMiseJobs = 10
 
 func (b *builder) loadedList() []string {
 	out := make([]string, 0, len(b.loaded))
@@ -130,6 +137,7 @@ func (b *builder) predeclared() starlark.StringDict {
 
 	miseModule := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
 		"tool": b.builtin("mise.tool", b.miseToolFn),
+		"jobs": b.builtin("mise.jobs", b.miseJobsFn),
 	})
 
 	pipModule := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
@@ -307,6 +315,20 @@ func (b *builder) miseToolFn(_ *starlark.Thread, fn *starlark.Builtin, args star
 	for _, s := range specs {
 		b.miseTools = append(b.miseTools, model.MiseTool{Name: s.name, Version: s.version})
 	}
+	return starlark.None, nil
+}
+
+// miseJobsFn implements mise.jobs(n): cap how many tools mise installs in
+// parallel (passed to `mise install --jobs n`).
+func (b *builder) miseJobsFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var n int
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "n", &n); err != nil {
+		return nil, err
+	}
+	if n < 1 {
+		return nil, fmt.Errorf("%s: must be >= 1, got %d", fn.Name(), n)
+	}
+	b.miseJobs = n
 	return starlark.None, nil
 }
 
@@ -497,6 +519,7 @@ func (b *builder) finalize() (*model.Plan, error) {
 		tools = append(tools, model.MiseTool{Name: "uv"})
 	}
 	p.MiseTools = tools
+	p.MiseJobs = b.miseJobs
 
 	// Tool bin directories are auto-prepended so their executables resolve first
 	// on PATH. pip and npm install into per-tool prefixes under
