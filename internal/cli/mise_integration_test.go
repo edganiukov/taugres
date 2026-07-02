@@ -31,6 +31,57 @@ func writeFakeMise(t *testing.T, store string) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// TestSyncSkipsUnchangedMiseInstall proves the per-tool staleness gate: a second
+// sync with nothing changed must not re-invoke `mise install` (no network),
+// because the tool is already present at its locked version.
+func TestSyncSkipsUnchangedMiseInstall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake mise shell stub is POSIX-only")
+	}
+	isolate(t)
+
+	store := testutil.TempWorkspace(t)
+	logFile := filepath.Join(t.TempDir(), "install.log")
+	binDir := t.TempDir()
+	// Fake mise: `install` logs a line and creates the store bin dir; `where`
+	// reports it. So the first sync installs (creating the dir); the cached bin
+	// dir then lets the freshness check skip the second.
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  install) echo call >> \"" + logFile + "\"; mkdir -p \"" + store + "/node/1/bin\" ;;\n" +
+		"  where) echo \"" + store + "/node/1\" ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "mise"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nmise.tool(\"node@1\")\n")
+	if code, _, e := run(t, dir, "allow"); code != 0 {
+		t.Fatalf("allow: %s", e)
+	}
+
+	installs := func() int {
+		data, _ := os.ReadFile(logFile)
+		return strings.Count(string(data), "call")
+	}
+
+	if code, _, e := run(t, dir, "sync"); code != 0 {
+		t.Fatalf("sync 1: %s", e)
+	}
+	n1 := installs()
+	if n1 == 0 {
+		t.Fatal("first sync should have run mise install")
+	}
+	if code, _, e := run(t, dir, "sync"); code != 0 {
+		t.Fatalf("sync 2: %s", e)
+	}
+	if n2 := installs(); n2 != n1 {
+		t.Errorf("second sync re-ran mise install (%d -> %d); expected it to be skipped", n1, n2)
+	}
+}
+
 func TestSyncPrependsMiseToolBinDir(t *testing.T) {
 	isolate(t)
 

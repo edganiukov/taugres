@@ -420,6 +420,18 @@ PATH, aliases, functions) is always generated so the shell still works, and the
 tool can be retried. Tool output is shown only with `tau sync --verbose`;
 otherwise a single spinner line reports progress.
 
+**Per-tool staleness.** A sync often runs for a reason unrelated to tools (a
+probe flip, an edited alias, `--if-stale`). Each manager therefore owns a
+freshness check — `mise.Fresh`, `pip.Fresh`, `npm.Fresh`, `uv.Fresh` (in the
+tool packages, next to their installers) — and its install is skipped entirely,
+touching no network, when its declared set is unchanged from the lock and its
+artifacts are present. This is a distinct *group* from the env-trigger checks
+(sources/tooldirs/probes in `internal/state`, which decide whether to sync at
+all): the env checks decide *whether* to sync; the tool checks decide *what work*
+the sync does. `--update` forces every manager. To keep the mise check offline
+(no `mise where`), the resolved store bin dir is cached in each mise lock entry
+(`binDir`); pip/uv/npm bin dirs are deterministic project-local paths.
+
 If `mise` is missing, tool installs are skipped with a clear message and the env
 is still generated.
 

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/edganiukov/taugres/internal/lock"
 	"github.com/edganiukov/taugres/internal/model"
 	"github.com/edganiukov/taugres/internal/tools/toolenv"
 )
@@ -107,6 +108,33 @@ type Installed struct {
 	Name     string // tool name
 	Resolved string // concrete resolved version (e.g. "22.11.0")
 	BinDir   string // directory holding its executables (for PATH)
+}
+
+// Fresh reports whether every tool is already installed at the version pinned in
+// the lock — its recorded spec matches the config, it resolved to a concrete
+// version, and its cached store bin dir still exists — so Install (and its
+// network access) can be skipped. Caching the bin dir in the lock is what lets
+// this stay offline: no `mise where` or `mise install` is run.
+func Fresh(tools []model.MiseTool, locked map[string]lock.Entry) bool {
+	for _, t := range tools {
+		e, ok := locked[t.Name]
+		if !ok || e.Requested != t.Version || e.Resolved == "" || e.BinDir == "" || !toolenv.IsDir(e.BinDir) {
+			return false
+		}
+	}
+	return true
+}
+
+// CachedBinDirs returns the store bin dirs recorded in the lock, in tool order.
+// It builds the activation PATH when Install is skipped because Fresh is true.
+func CachedBinDirs(tools []model.MiseTool, locked map[string]lock.Entry) []string {
+	var dirs []string
+	for _, t := range tools {
+		if e, ok := locked[t.Name]; ok && e.BinDir != "" {
+			dirs = append(dirs, e.BinDir)
+		}
+	}
+	return dirs
 }
 
 // Install installs the given tools (each MiseTool.Version is the exact spec to

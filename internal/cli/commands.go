@@ -267,10 +267,24 @@ func runSync(e *Env, args []string) int {
 		toolErrs = append(toolErrs, msg)
 		toolErrsMu.Unlock()
 	}
-	var miseBinDirs []string
+	// Per-tool staleness: each manager installs only when its declared set
+	// changed or its artifacts are missing (or --update forces it). A sync
+	// triggered for an unrelated reason therefore does no tool work and hits no
+	// network. --update re-resolves unpinned entries, so it forces every manager.
+	force := *update
+	var miseBinDirs, toolchainBinDirs, restBinDirs []string
+	miseReinstalled := false
+	var wg sync.WaitGroup
+
 	if len(plan.MiseTools) > 0 && !mise.Available() {
 		addErr("mise is required to install tools but is not installed — install it with `curl https://mise.run | sh` (see https://mise.jdx.dev; the mise binary on PATH is all tau needs)")
-	} else {
+	} else if len(plan.MiseTools) > 0 && !force && mise.Fresh(plan.MiseTools, lk.Mise) {
+		// Present and unchanged: skip mise entirely, reuse the cached store bin
+		// dirs for PATH (and as the toolchain for pip/uv/npm).
+		miseBinDirs = mise.CachedBinDirs(plan.MiseTools, lk.Mise)
+		toolchainBinDirs = miseBinDirs
+	} else if len(plan.MiseTools) > 0 {
+		miseReinstalled = true
 		// Effective versions (locked unless --update / spec changed).
 		effMise := make([]model.MiseTool, len(plan.MiseTools))
 		reqByName := map[string]string{}
@@ -279,12 +293,13 @@ func runSync(e *Env, args []string) int {
 			effMise[i] = model.MiseTool{Name: t.Name, Version: lock.InstallVersion(t.Version, e, ok, *update)}
 			reqByName[t.Name] = t.Version
 		}
-		// recordMise writes lock entries and returns the tools' bin dirs. Each
-		// caller touches only its own tools' entries, so concurrent calls are safe.
+		// recordMise writes lock entries (including the resolved bin dir, for the
+		// offline freshness check) and returns the tools' bin dirs. Each caller
+		// touches only its own tools' entries, so concurrent calls are safe.
 		recordMise := func(installed []mise.Installed) []string {
 			var dirs []string
 			for _, ins := range installed {
-				lk.Mise[ins.Name] = lock.Entry{Requested: reqByName[ins.Name], Resolved: ins.Resolved}
+				lk.Mise[ins.Name] = lock.Entry{Requested: reqByName[ins.Name], Resolved: ins.Resolved, BinDir: ins.BinDir}
 				dirs = append(dirs, ins.BinDir)
 			}
 			return dirs
@@ -306,7 +321,6 @@ func runSync(e *Env, args []string) int {
 			}
 		}
 
-		var toolchainBinDirs []string
 		if len(toolchain) > 0 {
 			installed, err := mise.Install(toolchain, plan.MiseJobs, rep.Stream("mise: "), installReport)
 			if err != nil {
@@ -314,12 +328,7 @@ func runSync(e *Env, args []string) int {
 			}
 			toolchainBinDirs = recordMise(installed)
 		}
-
-		// With the toolchain ready, the rest of the mise tools and the pip/npm
-		// installs are independent — run them concurrently. pip/npm use only the
-		// toolchain dirs, so they never wait on (or fail because of) other tools.
-		var restBinDirs []string
-		var wg sync.WaitGroup
+		// The rest of the mise tools install concurrently with pip/npm/uv below.
 		if len(rest) > 0 {
 			wg.Go(func() {
 				installed, err := mise.Install(rest, plan.MiseJobs, rep.Stream("mise: "), installReport)
@@ -329,61 +338,67 @@ func runSync(e *Env, args []string) int {
 				restBinDirs = recordMise(installed)
 			})
 		}
-		if len(plan.PipPackages) > 0 {
-			wg.Go(func() {
-				eff := make([]model.PipPackage, len(plan.PipPackages))
-				for i, p := range plan.PipPackages {
-					e, ok := lk.Pip[p.Name]
-					eff[i] = model.PipPackage{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, *update)}
+	}
+
+	// pip/npm/uv install concurrently, each gated by its own freshness check.
+	// They use the toolchain bin dirs (fresh install or cached) to find
+	// python/node/uv, so they never depend on other mise tools.
+	if len(plan.PipPackages) > 0 && (force || !pip.Fresh(plan.PipPackages, plan.PipDir, lk.Pip)) {
+		wg.Go(func() {
+			eff := make([]model.PipPackage, len(plan.PipPackages))
+			for i, p := range plan.PipPackages {
+				e, ok := lk.Pip[p.Name]
+				eff[i] = model.PipPackage{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, *update)}
+			}
+			resolved, err := pip.Install(eff, plan.PipDir, toolchainBinDirs, rep.Stream("pip: "), installReport)
+			if err != nil {
+				addErr(err.Error())
+			}
+			for i, p := range plan.PipPackages {
+				if v, ok := resolved[p.Name]; ok {
+					lk.Pip[p.Name] = lock.Entry{Requested: plan.PipPackages[i].Version, Resolved: v}
 				}
-				resolved, err := pip.Install(eff, plan.PipDir, toolchainBinDirs, rep.Stream("pip: "), installReport)
-				if err != nil {
-					addErr(err.Error())
+			}
+		})
+	}
+	if len(plan.NpmPackages) > 0 && (force || !npm.Fresh(plan.NpmPackages, plan.NpmDir, lk.Npm)) {
+		wg.Go(func() {
+			eff := make([]model.NpmPackage, len(plan.NpmPackages))
+			for i, p := range plan.NpmPackages {
+				e, ok := lk.Npm[p.Name]
+				eff[i] = model.NpmPackage{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, *update)}
+			}
+			resolved, err := npm.Install(eff, plan.NpmDir, toolchainBinDirs, rep.Stream("npm: "), installReport)
+			if err != nil {
+				addErr(err.Error())
+			}
+			for i, p := range plan.NpmPackages {
+				if v, ok := resolved[p.Name]; ok {
+					lk.Npm[p.Name] = lock.Entry{Requested: plan.NpmPackages[i].Version, Resolved: v}
 				}
-				for i, p := range plan.PipPackages {
-					if v, ok := resolved[p.Name]; ok {
-						lk.Pip[p.Name] = lock.Entry{Requested: plan.PipPackages[i].Version, Resolved: v}
-					}
+			}
+		})
+	}
+	if len(plan.UvPackages) > 0 && (force || !uv.Fresh(plan.UvPackages, plan.UvDir, lk.Uv)) {
+		wg.Go(func() {
+			eff := make([]model.UvPackage, len(plan.UvPackages))
+			for i, p := range plan.UvPackages {
+				e, ok := lk.Uv[p.Name]
+				eff[i] = model.UvPackage{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, *update)}
+			}
+			resolved, err := uv.Install(eff, plan.UvDir, toolchainBinDirs, rep.Stream("uv: "), installReport)
+			if err != nil {
+				addErr(err.Error())
+			}
+			for i, p := range plan.UvPackages {
+				if v, ok := resolved[p.Name]; ok {
+					lk.Uv[p.Name] = lock.Entry{Requested: plan.UvPackages[i].Version, Resolved: v}
 				}
-			})
-		}
-		if len(plan.NpmPackages) > 0 {
-			wg.Go(func() {
-				eff := make([]model.NpmPackage, len(plan.NpmPackages))
-				for i, p := range plan.NpmPackages {
-					e, ok := lk.Npm[p.Name]
-					eff[i] = model.NpmPackage{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, *update)}
-				}
-				resolved, err := npm.Install(eff, plan.NpmDir, toolchainBinDirs, rep.Stream("npm: "), installReport)
-				if err != nil {
-					addErr(err.Error())
-				}
-				for i, p := range plan.NpmPackages {
-					if v, ok := resolved[p.Name]; ok {
-						lk.Npm[p.Name] = lock.Entry{Requested: plan.NpmPackages[i].Version, Resolved: v}
-					}
-				}
-			})
-		}
-		if len(plan.UvPackages) > 0 {
-			wg.Go(func() {
-				eff := make([]model.UvPackage, len(plan.UvPackages))
-				for i, p := range plan.UvPackages {
-					e, ok := lk.Uv[p.Name]
-					eff[i] = model.UvPackage{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, *update)}
-				}
-				resolved, err := uv.Install(eff, plan.UvDir, toolchainBinDirs, rep.Stream("uv: "), installReport)
-				if err != nil {
-					addErr(err.Error())
-				}
-				for i, p := range plan.UvPackages {
-					if v, ok := resolved[p.Name]; ok {
-						lk.Uv[p.Name] = lock.Entry{Requested: plan.UvPackages[i].Version, Resolved: v}
-					}
-				}
-			})
-		}
-		wg.Wait()
+			}
+		})
+	}
+	wg.Wait()
+	if miseReinstalled {
 		miseBinDirs = append(toolchainBinDirs, restBinDirs...)
 	}
 
