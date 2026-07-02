@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -196,12 +197,65 @@ func TestToolSpecRejectsSecondArg(t *testing.T) {
 	}
 }
 
+func TestExists(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "present.txt", "hi\n")
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+if exists("//present.txt"):
+    shell.env("HAS", "yes")
+if not exists("//absent.txt"):
+    shell.env("MISSING", "yes")
+`)
+	p := evalWorkspace(t, dir).Plan
+	if p.EnvSet["HAS"] != "yes" {
+		t.Errorf("exists(present) should be true")
+	}
+	if p.EnvSet["MISSING"] != "yes" {
+		t.Errorf("exists(absent) should be false")
+	}
+
+	// A bare relative path is rejected, like other path arguments.
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nexists(\"present.txt\")\n")
+	d, _ := discover.Discover(dir)
+	if _, err := Evaluate(d); err == nil {
+		t.Error("expected error for bare relative path")
+	}
+}
+
+func TestWhich(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	// A fake executable on a PATH we control.
+	binDir := t.TempDir()
+	fake := filepath.Join(binDir, "taufake")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+p = which("taufake")
+if p:
+    shell.env("FAKE", p)
+if not which("tau-definitely-absent-xyz"):
+    shell.env("NOPE", "yes")
+`)
+	p := evalWorkspace(t, dir).Plan
+	if p.EnvSet["FAKE"] != fake {
+		t.Errorf("which(taufake) = %q, want %q", p.EnvSet["FAKE"], fake)
+	}
+	if p.EnvSet["NOPE"] != "yes" {
+		t.Errorf("which(absent) should be None/falsy")
+	}
+}
+
 func TestMiseJobs(t *testing.T) {
 	dir := testutil.TempWorkspace(t)
-	// Default is 10 when mise.jobs is not called.
+	// Default is defaultMiseJobs when mise.jobs is not called.
 	testutil.WriteFile(t, dir, "workspace.tg", `project("x")`)
-	if got := evalWorkspace(t, dir).Plan.MiseJobs; got != 10 {
-		t.Errorf("default MiseJobs = %d, want 10", got)
+	if got := evalWorkspace(t, dir).Plan.MiseJobs; got != defaultMiseJobs {
+		t.Errorf("default MiseJobs = %d, want %d", got, defaultMiseJobs)
 	}
 	// Overridable.
 	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nmise.jobs(3)\n")

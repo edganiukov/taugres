@@ -1,11 +1,13 @@
 // Package config evaluates Taugres `.tg` files (Starlark) into a normalized
-// plan. Builtins mutate only the in-memory plan; Starlark has no ambient access
-// to the filesystem, network, or shell.
+// plan. Builtins mutate only the in-memory plan and cannot run commands or write
+// anything. The only host access is read-only probing for conditional config:
+// exists(path) checks the filesystem and which(name) checks PATH.
 package config
 
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -149,6 +151,8 @@ func (b *builder) predeclared() starlark.StringDict {
 
 	return starlark.StringDict{
 		"project":  b.builtin("project", b.projectFn),
+		"exists":   b.builtin("exists", b.existsFn),
+		"which":    b.builtin("which", b.whichFn),
 		"shell":    shellModule,
 		"mise":     miseModule,
 		"pip":      pipModule,
@@ -171,6 +175,43 @@ func (b *builder) projectFn(_ *starlark.Thread, fn *starlark.Builtin, args starl
 	}
 	b.projectName = name
 	return starlark.None, nil
+}
+
+// existsFn implements exists(path): report whether a root-anchored ("//…") or
+// absolute path exists on disk (file or directory). Handy for conditional
+// config, e.g. `if exists("//go.mod"): mise.tool("go")`.
+//
+// Note: this makes evaluation depend on the host filesystem, so a config using
+// it is only as reproducible as the paths it probes.
+func (b *builder) existsFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var path string
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "path", &path); err != nil {
+		return nil, err
+	}
+	resolved, err := b.resolvePath(path)
+	if err != nil {
+		return nil, err
+	}
+	_, statErr := os.Stat(resolved)
+	return starlark.Bool(statErr == nil), nil
+}
+
+// whichFn implements which(name): return the absolute path of an executable
+// found on PATH, or None if it is not present. Composes as a truthy check
+// (`if which("git"): …`) while also exposing the resolved path.
+//
+// Like exists(), this depends on the host environment (the PATH in effect when
+// tau runs), so use it as an escape hatch, not for reproducible pins.
+func (b *builder) whichFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "name", &name); err != nil {
+		return nil, err
+	}
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return starlark.None, nil
+	}
+	return starlark.String(path), nil
 }
 
 func (b *builder) envFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

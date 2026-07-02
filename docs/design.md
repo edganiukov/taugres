@@ -135,10 +135,11 @@ the next prompt without a manual step (see Shell hook).
 
 ## Starlark configuration model
 
-Starlark gives real functions, conditionals, deterministic evaluation,
-`load(...)` imports, and no ambient filesystem/network/shell access unless
-Taugres exposes it. The API is side-effect style: calls mutate an in-memory
-plan, never the host.
+Starlark gives real functions, conditionals, deterministic evaluation, and
+`load(...)` imports. The API is side-effect style: calls mutate an in-memory
+plan, never the host. Host access is limited to two read-only probes for
+conditional config — `exists(path)` and `which(name)` — which can read the
+filesystem/PATH but never run commands or write anything.
 
 All shell-facing configuration is grouped under the `shell` namespace; external
 tool managers keep their own namespaces.
@@ -199,6 +200,9 @@ npm.install("typescript") | npm.install(["typescript@5.6.2", "@scope/x@1"])
 
 platform.os                     # "linux" | "macos"
 platform.arch                   # "x86_64" | "aarch64" | ...
+
+exists("//go.mod")              # bool: root-anchored/absolute path on disk?
+which("docker")                 # abs path of a PATH binary, or None
 
 load("//taugres/lib/x.tg", "sym")   # root-anchored
 load("./lib/x.tg", "sym")           # relative to the importing file

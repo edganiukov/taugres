@@ -79,6 +79,28 @@ All shell-facing configuration lives under the `shell` namespace (`shell.env`,
 to `PATH` explicitly, e.g. `shell.path.prepend("//bin")`. Reusable helpers can be
 loaded: `load("//taugres/lib/node.tg", "node_project")`.
 
+### Conditional config: `exists` and `which`
+
+Two read-only host probes let a config adapt to what's on the machine:
+
+```python
+# exists(path) -> bool: is a root-anchored ("//…") or absolute path on disk?
+if exists("//go.mod"):
+    mise.tool("go@1.26.2")
+
+# which(name) -> the absolute path of a binary on PATH, or None.
+if which("docker"):
+    shell.alias("dc", "docker compose")
+
+go = which("go")   # "/usr/bin/go" or None
+if go:
+    shell.env("GOBIN", go)
+```
+
+Both only *read* the environment — they never run a command or write anything.
+Because their result depends on the host filesystem/PATH, treat them as an escape
+hatch: a config that branches on them is only as reproducible as what it probes.
+
 ## Tools and packages
 
 Declare tools/packages and `tau sync` installs them into `.taugres/` and adds
