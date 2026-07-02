@@ -18,7 +18,7 @@ shell.env("FOO", "BAR")
 # Tools/packages install via mise (a hard dependency) and are added to PATH on
 # activation. Versions are pinned in .taugres.lock; `tau sync --update` refreshes
 # unpinned ones.
-mise.tool("go@1.26.2")
+mise.tool("go@1.26.4")
 
 # Python packages install into a project-local venv (.taugres/tools/pip); its
 # bin is prepended to PATH. Implies mise python.

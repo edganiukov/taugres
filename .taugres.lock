@@ -2,8 +2,8 @@
   "lockfileVersion": 1,
   "mise": {
     "go": {
-      "requested": "1.26.2",
-      "resolved": "1.26.2"
+      "requested": "1.26.4",
+      "resolved": "1.26.4"
     }
   }
 }
