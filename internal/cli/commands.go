@@ -1148,10 +1148,21 @@ func runDeactivate(e *Env, args []string) int { return emitGenScript(e, args, "d
 // hook code), so tearing down must always work — even after `tau deny` — and its
 // guards make sourcing it a no-op when nothing was active.
 func emitGenScript(e *Env, args []string, kind string) int {
-	if len(args) != 1 {
-		return fail(e, "usage: tau %s <shell> (bash|zsh|fish)", kind)
+	var shell string
+	switch len(args) {
+	case 0:
+		// Default to the current shell via $SHELL. The hook always passes the shell
+		// explicitly (it knows it); this default is for manual `eval "$(tau activate)"`.
+		sh := os.Getenv("SHELL")
+		if sh == "" {
+			return fail(e, "$SHELL is not set; pass a shell: tau %s <shell> (bash|zsh|fish)", kind)
+		}
+		shell = filepath.Base(sh)
+	case 1:
+		shell = args[0]
+	default:
+		return fail(e, "usage: tau %s [shell] (bash|zsh|fish)", kind)
 	}
-	shell := args[0]
 	if !slices.Contains(render.SupportedShells, shell) {
 		return fail(e, "unsupported shell %q (supported: %s)", shell, strings.Join(render.SupportedShells, ", "))
 	}

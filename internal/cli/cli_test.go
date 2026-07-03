@@ -266,6 +266,35 @@ func TestActivateRejectsUnsupportedShell(t *testing.T) {
 	}
 }
 
+func TestActivateDefaultsToShellEnv(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nshell.env(\"A\", \"b\")\n")
+	run(t, dir, "allow")
+	run(t, dir, "sync")
+
+	// With no shell arg, tau uses $SHELL.
+	t.Setenv("SHELL", "/bin/zsh")
+	code, out, errOut := run(t, dir, "activate")
+	if code != 0 {
+		t.Fatalf("activate (no arg) exit %d: %s", code, errOut)
+	}
+	want, err := os.ReadFile(filepath.Join(dir, ".taugres", "gen", "activate.zsh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != string(want) {
+		t.Errorf("activate did not default to $SHELL (zsh):\n%s", out)
+	}
+
+	// Unset $SHELL: it must error and say to pass one.
+	t.Setenv("SHELL", "")
+	code, _, errOut = run(t, dir, "activate")
+	if code == 0 || !strings.Contains(errOut, "SHELL is not set") {
+		t.Errorf("expected an error when $SHELL is unset, got code=%d err=%q", code, errOut)
+	}
+}
+
 func TestDeactivatePrintsScript(t *testing.T) {
 	isolate(t)
 	dir := testutil.TempWorkspace(t)

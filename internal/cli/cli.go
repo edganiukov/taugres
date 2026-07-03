@@ -95,8 +95,8 @@ Usage:
   tau clean [--lock]         remove generated state (.taugres/); --lock also drops .taugres.lock
   tau prune                  remove trust records for projects that no longer exist
   tau hook <shell>           print the shell hook (bash|zsh|fish)
-  tau activate <shell>       print the activation script for a trusted project
-  tau deactivate <shell>     print the deactivation script for the active project
+  tau activate [shell]       print the activation script for a trusted project (default: current shell)
+  tau deactivate [shell]     print the deactivation script for the active project (default: current shell)
   tau version                print version
 
 Flags:
