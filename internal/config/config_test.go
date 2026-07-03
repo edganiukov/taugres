@@ -163,11 +163,11 @@ npm.install(["typescript@5.6.2", "@angular/cli@17", "cowsay"])
 			t.Errorf("MiseTools[%d] = %+v, want %+v", i, p.MiseTools[i], w)
 		}
 	}
-	if p.PipPackages[0] != (model.PipPackage{Name: "ruff", Version: "0.6.9"}) || p.PipPackages[1] != (model.PipPackage{Name: "rich"}) {
+	if p.PipPackages[0] != (model.Package{Name: "ruff", Version: "0.6.9"}) || p.PipPackages[1] != (model.Package{Name: "rich"}) {
 		t.Errorf("PipPackages = %+v", p.PipPackages)
 	}
 	// npm scoped name keeps its leading "@"; version comes from the last "@".
-	want := []model.NpmPackage{{Name: "typescript", Version: "5.6.2"}, {Name: "@angular/cli", Version: "17"}, {Name: "cowsay"}}
+	want := []model.Package{{Name: "typescript", Version: "5.6.2"}, {Name: "@angular/cli", Version: "17"}, {Name: "cowsay"}}
 	for i, w := range want {
 		if p.NpmPackages[i] != w {
 			t.Errorf("NpmPackages[%d] = %+v, want %+v", i, p.NpmPackages[i], w)
@@ -338,7 +338,7 @@ uv.install(["ruff@0.6.9", "rich"])
 `)
 	res := evalWorkspace(t, dir)
 	p := res.Plan
-	if len(p.UvPackages) != 2 || p.UvPackages[0] != (model.UvPackage{Name: "ruff", Version: "0.6.9"}) {
+	if len(p.UvPackages) != 2 || p.UvPackages[0] != (model.Package{Name: "ruff", Version: "0.6.9"}) {
 		t.Fatalf("UvPackages = %+v", p.UvPackages)
 	}
 	wantUv := filepath.Join(dir, ".taugres", "tools", "uv")

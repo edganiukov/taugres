@@ -354,61 +354,48 @@ func runSync(e *Env, args []string) int {
 		}
 	}
 
-	// pip/npm/uv install concurrently, each gated by its own freshness check.
-	// They use the toolchain bin dirs (fresh install or cached) to find
-	// python/node/uv, so they never depend on other mise tools.
-	if pipStale {
-		wg.Go(func() {
-			eff := make([]model.PipPackage, len(plan.PipPackages))
-			for i, p := range plan.PipPackages {
-				e, ok := lk.Pip[p.Name]
-				eff[i] = model.PipPackage{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, *update)}
-			}
-			resolved, err := pip.Install(eff, plan.PipDir, toolchainBinDirs, rep.Stream("pip: "), installReport)
-			if err != nil {
-				addErr(err.Error())
-			}
-			for i, p := range plan.PipPackages {
-				if v, ok := resolved[p.Name]; ok {
-					lk.Pip[p.Name] = lock.Entry{Requested: plan.PipPackages[i].Version, Resolved: v}
-				}
-			}
-		})
+	// The pip/uv/npm integrations are uniform, so describe them once and let
+	// install and GC iterate instead of repeating near-identical blocks. Each
+	// closure captures its manager's prefix dir, the toolchain bin dirs, and its
+	// output stream. dir is the canonical prefix (known even with no packages, so
+	// GC can remove a fully-dropped manager); its bin/ is auto-prepended to PATH.
+	pkgDir := func(name string) string { return filepath.Join(plan.StateDir, "tools", name) }
+	managers := []packageManager{
+		{
+			label: "pip", stale: pipStale, pkgs: plan.PipPackages, dir: pkgDir("pip"), section: lk.Pip,
+			install: func(p []model.Package) (map[string]string, error) {
+				return pip.Install(p, pkgDir("pip"), toolchainBinDirs, rep.Stream("pip: "), installReport)
+			},
+			uninstall: func(n []string) error { return pip.Uninstall(pkgDir("pip"), n, rep.Stream("pip: ")) },
+		},
+		{
+			label: "npm", stale: npmStale, pkgs: plan.NpmPackages, dir: pkgDir("npm"), section: lk.Npm,
+			install: func(p []model.Package) (map[string]string, error) {
+				return npm.Install(p, pkgDir("npm"), toolchainBinDirs, rep.Stream("npm: "), installReport)
+			},
+			uninstall: func(n []string) error { return npm.Uninstall(pkgDir("npm"), n, toolchainBinDirs, rep.Stream("npm: ")) },
+		},
+		{
+			label: "uv", stale: uvStale, pkgs: plan.UvPackages, dir: pkgDir("uv"), section: lk.Uv,
+			install: func(p []model.Package) (map[string]string, error) {
+				return uv.Install(p, pkgDir("uv"), toolchainBinDirs, rep.Stream("uv: "), installReport)
+			},
+			uninstall: func(n []string) error { return uv.Uninstall(pkgDir("uv"), n, toolchainBinDirs, rep.Stream("uv: ")) },
+		},
 	}
-	if npmStale {
+	// Install stale managers concurrently (with the rest of mise, above). They use
+	// the toolchain bin dirs to find python/node/uv, so never wait on other tools.
+	for i := range managers {
+		m := managers[i]
+		if !m.stale {
+			continue
+		}
 		wg.Go(func() {
-			eff := make([]model.NpmPackage, len(plan.NpmPackages))
-			for i, p := range plan.NpmPackages {
-				e, ok := lk.Npm[p.Name]
-				eff[i] = model.NpmPackage{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, *update)}
-			}
-			resolved, err := npm.Install(eff, plan.NpmDir, toolchainBinDirs, rep.Stream("npm: "), installReport)
+			resolved, err := m.install(effectiveVersions(m.pkgs, m.section, *update))
 			if err != nil {
 				addErr(err.Error())
 			}
-			for i, p := range plan.NpmPackages {
-				if v, ok := resolved[p.Name]; ok {
-					lk.Npm[p.Name] = lock.Entry{Requested: plan.NpmPackages[i].Version, Resolved: v}
-				}
-			}
-		})
-	}
-	if uvStale {
-		wg.Go(func() {
-			eff := make([]model.UvPackage, len(plan.UvPackages))
-			for i, p := range plan.UvPackages {
-				e, ok := lk.Uv[p.Name]
-				eff[i] = model.UvPackage{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, *update)}
-			}
-			resolved, err := uv.Install(eff, plan.UvDir, toolchainBinDirs, rep.Stream("uv: "), installReport)
-			if err != nil {
-				addErr(err.Error())
-			}
-			for i, p := range plan.UvPackages {
-				if v, ok := resolved[p.Name]; ok {
-					lk.Uv[p.Name] = lock.Entry{Requested: plan.UvPackages[i].Version, Resolved: v}
-				}
-			}
+			recordResolved(m.section, m.pkgs, resolved)
 		})
 	}
 	wg.Wait()
@@ -417,9 +404,17 @@ func runSync(e *Env, args []string) int {
 	}
 
 	// GC: uninstall packages and prune lock entries that were removed from the
-	// config. mise installs live in the shared store, so we only drop their lock
-	// entries (mise manages its own store).
-	gcTools(plan, lk, miseBinDirs, rep)
+	// config.
+	gcTools(plan, lk, managers, rep)
+
+	// Tool bin dirs recorded for staleness: mise store bins + each package
+	// manager's prefix bin (present only when it has packages).
+	toolDirs := append([]string{}, miseBinDirs...)
+	for _, m := range managers {
+		if len(m.pkgs) > 0 {
+			toolDirs = append(toolDirs, filepath.Join(m.dir, "bin"))
+		}
+	}
 
 	// Persist the lockfile (best effort; it is committed with the project).
 	if err := lk.Save(d.ProjectRoot); err != nil {
@@ -458,7 +453,6 @@ func runSync(e *Env, args []string) int {
 	// config inputs (config file, loaded modules, fn/hook source files), the tool
 	// bin dirs that must exist, and the exists()/which() probe results — so a
 	// changed input, a removed tool dir, or a flipped probe all trigger a resync.
-	toolDirs := append(append([]string{}, miseBinDirs...), plan.ProjectToolBinDirs()...)
 	m, err := buildManifest(res, toolDirs)
 	if err != nil {
 		return syncFail("building manifest: %v", err)
@@ -536,8 +530,9 @@ func buildManifest(res *config.Result, toolDirs []string) (*state.Manifest, erro
 // PATH entries need no cleanup — they are regenerated from the current config.
 // mise installs live in mise's shared store, so only their lock entries are
 // pruned; pip/npm packages are uninstalled from their project-local prefixes.
-func gcTools(plan *model.Plan, lk *lock.File, toolchainBins []string, rep *ui.Reporter) {
-	// mise: prune lock entries for tools no longer declared.
+func gcTools(plan *model.Plan, lk *lock.File, managers []packageManager, rep *ui.Reporter) {
+	// mise: prune lock entries for tools no longer declared (installs live in
+	// mise's shared store, so only the lock entry is dropped).
 	keep := nameSet(plan.MiseTools, func(t model.MiseTool) string { return t.Name })
 	for name := range lk.Mise {
 		if !keep[name] {
@@ -545,43 +540,56 @@ func gcTools(plan *model.Plan, lk *lock.File, toolchainBins []string, rep *ui.Re
 		}
 	}
 
-	// pip: if no packages remain, drop the whole venv; otherwise uninstall the
-	// packages that were removed.
-	pipDir := filepath.Join(plan.StateDir, "tools", "pip")
-	if len(plan.PipPackages) == 0 {
-		_ = os.RemoveAll(pipDir)
-		lk.Pip = map[string]lock.Entry{}
-	} else if removed := removedKeys(lk.Pip, nameSet(plan.PipPackages, func(p model.PipPackage) string { return p.Name })); len(removed) > 0 {
-		rep.Step("tau: removing " + strings.Join(removed, ", "))
-		_ = pip.Uninstall(pipDir, removed, rep.Stream("pip: "))
-		for _, n := range removed {
-			delete(lk.Pip, n)
+	// pip/uv/npm: drop the whole prefix if the manager has no packages left;
+	// otherwise uninstall just the ones removed from the config.
+	for _, m := range managers {
+		if len(m.pkgs) == 0 {
+			_ = os.RemoveAll(m.dir)
+			clear(m.section)
+			continue
+		}
+		removed := removedKeys(m.section, nameSet(m.pkgs, func(p model.Package) string { return p.Name }))
+		if len(removed) > 0 {
+			rep.Step("tau: removing " + strings.Join(removed, ", "))
+			_ = m.uninstall(removed)
+			for _, n := range removed {
+				delete(m.section, n)
+			}
 		}
 	}
+}
 
-	// npm: symmetric with pip.
-	npmDir := filepath.Join(plan.StateDir, "tools", "npm")
-	if len(plan.NpmPackages) == 0 {
-		_ = os.RemoveAll(npmDir)
-		lk.Npm = map[string]lock.Entry{}
-	} else if removed := removedKeys(lk.Npm, nameSet(plan.NpmPackages, func(p model.NpmPackage) string { return p.Name })); len(removed) > 0 {
-		rep.Step("tau: removing " + strings.Join(removed, ", "))
-		_ = npm.Uninstall(npmDir, removed, toolchainBins, rep.Stream("npm: "))
-		for _, n := range removed {
-			delete(lk.Npm, n)
-		}
+// packageManager describes one of the uniform pip/uv/npm integrations so a sync
+// can drive install and GC from a table instead of near-identical blocks. The
+// install/uninstall closures capture the manager's prefix dir, toolchain bin
+// dirs, and output stream.
+type packageManager struct {
+	label     string
+	stale     bool
+	pkgs      []model.Package
+	dir       string // canonical prefix (<stateDir>/tools/<label>); its bin/ is on PATH
+	section   map[string]lock.Entry
+	install   func(pkgs []model.Package) (map[string]string, error)
+	uninstall func(names []string) error
+}
+
+// effectiveVersions maps declared packages to the versions to install: the
+// locked version unless --update or the spec changed re-resolves them.
+func effectiveVersions(pkgs []model.Package, locked map[string]lock.Entry, update bool) []model.Package {
+	eff := make([]model.Package, len(pkgs))
+	for i, p := range pkgs {
+		e, ok := locked[p.Name]
+		eff[i] = model.Package{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, update)}
 	}
+	return eff
+}
 
-	// uv: symmetric with pip.
-	uvDir := filepath.Join(plan.StateDir, "tools", "uv")
-	if len(plan.UvPackages) == 0 {
-		_ = os.RemoveAll(uvDir)
-		lk.Uv = map[string]lock.Entry{}
-	} else if removed := removedKeys(lk.Uv, nameSet(plan.UvPackages, func(p model.UvPackage) string { return p.Name })); len(removed) > 0 {
-		rep.Step("tau: removing " + strings.Join(removed, ", "))
-		_ = uv.Uninstall(uvDir, removed, toolchainBins, rep.Stream("uv: "))
-		for _, n := range removed {
-			delete(lk.Uv, n)
+// recordResolved writes each package's resolved concrete version back to the
+// lock section.
+func recordResolved(locked map[string]lock.Entry, pkgs []model.Package, resolved map[string]string) {
+	for _, p := range pkgs {
+		if v, ok := resolved[p.Name]; ok {
+			locked[p.Name] = lock.Entry{Requested: p.Version, Resolved: v}
 		}
 	}
 }

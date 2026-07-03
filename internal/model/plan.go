@@ -2,8 +2,6 @@
 // a Taugres config and consumed by the shell renderers.
 package model
 
-import "path/filepath"
-
 // SourceFunc describes a single shell function. Its body comes from either a
 // file (File, sourced at call time) or an inline string (Content, embedded in
 // the generated function). Exactly one of File/Content is set. A given function
@@ -32,27 +30,12 @@ type MiseTool struct {
 	Version string `json:"version"`
 }
 
-// PipPackage is a Python package to be installed via pip into the project-local
-// virtualenv, declared with pip.install(name, version). An empty Version means
-// the latest compatible release.
-type PipPackage struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-// NpmPackage is a Node package to be installed via npm into a project-local
-// prefix, declared with npm.install(name, version). An empty Version means the
-// latest release. Its executables become runnable on PATH (like npx, but
-// resolved directly).
-type NpmPackage struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-// UvPackage is a Python package installed via uv into a project-local venv,
-// declared with uv.install(name, version). Like PipPackage but backed by uv
-// (faster; manages the venv itself). An empty Version means latest.
-type UvPackage struct {
+// Package is a library to be installed by a package manager (pip, uv, or npm)
+// into a project-local prefix, declared with pip.install/uv.install/npm.install.
+// An empty Version means the latest release. The managing tool is conveyed by
+// which Plan field holds it (PipPackages/UvPackages/NpmPackages), so one type
+// serves all three.
+type Package struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 }
@@ -108,13 +91,13 @@ type Plan struct {
 	MiseJobs int `json:"miseJobs,omitempty"`
 
 	// PipPackages declared with pip.install(...), in declaration order.
-	PipPackages []PipPackage `json:"pipPackages"`
+	PipPackages []Package `json:"pipPackages"`
 
 	// NpmPackages declared with npm.install(...), in declaration order.
-	NpmPackages []NpmPackage `json:"npmPackages"`
+	NpmPackages []Package `json:"npmPackages"`
 
 	// UvPackages declared with uv.install(...), in declaration order.
-	UvPackages []UvPackage `json:"uvPackages,omitempty"`
+	UvPackages []Package `json:"uvPackages,omitempty"`
 
 	// PipDir is the project-local pip virtualenv (<stateDir>/tools/pip). It is
 	// set when PipPackages is non-empty; its bin/ is auto-prepended to PATH.
@@ -127,23 +110,6 @@ type Plan struct {
 	// UvDir is the project-local uv virtualenv (<stateDir>/tools/uv). It is set
 	// when UvPackages is non-empty; its bin/ is auto-prepended to PATH.
 	UvDir string `json:"uvDir,omitempty"`
-}
-
-// ProjectToolBinDirs returns the project-local tool bin directories (pip venv,
-// npm prefix). mise tool bin dirs live in mise's store and are added at sync
-// time, since their versioned paths are only known after installation.
-func (p *Plan) ProjectToolBinDirs() []string {
-	var dirs []string
-	if p.PipDir != "" {
-		dirs = append(dirs, filepath.Join(p.PipDir, "bin"))
-	}
-	if p.NpmDir != "" {
-		dirs = append(dirs, filepath.Join(p.NpmDir, "bin"))
-	}
-	if p.UvDir != "" {
-		dirs = append(dirs, filepath.Join(p.UvDir, "bin"))
-	}
-	return dirs
 }
 
 // NewPlan returns an empty plan with initialized maps.

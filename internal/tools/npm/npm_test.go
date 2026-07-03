@@ -39,7 +39,7 @@ func TestInstallIntoPrefixAndStreams(t *testing.T) {
 	npmDir := filepath.Join(testutil.TempWorkspace(t), ".taugres", "tools", "npm")
 
 	var out bytes.Buffer
-	_, err := Install([]model.NpmPackage{{Name: "typescript", Version: "5.6.2"}, {Name: "cowsay"}}, npmDir, []string{toolchain}, &out, nil)
+	_, err := Install([]model.Package{{Name: "typescript", Version: "5.6.2"}, {Name: "cowsay"}}, npmDir, []string{toolchain}, &out, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestInstallIntoPrefixAndStreams(t *testing.T) {
 func TestInstallErrorsWithoutNpm(t *testing.T) {
 	// Empty toolchain + a PATH with no npm.
 	t.Setenv("PATH", t.TempDir())
-	_, err := Install([]model.NpmPackage{{Name: "cowsay"}}, t.TempDir(), nil, nil, nil)
+	_, err := Install([]model.Package{{Name: "cowsay"}}, t.TempDir(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when npm is unavailable")
 	}

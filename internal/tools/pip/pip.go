@@ -26,7 +26,7 @@ import (
 // so Install (and its network access) can be skipped. Per-package presence
 // inside the venv is not inspected; a wiped venv dir is caught by the tooldirs
 // staleness check, which forces a full sync.
-func Fresh(pkgs []model.PipPackage, venvDir string, locked map[string]lock.Entry) bool {
+func Fresh(pkgs []model.Package, venvDir string, locked map[string]lock.Entry) bool {
 	if len(pkgs) == 0 {
 		return true // nothing declared -> nothing to install
 	}
@@ -48,7 +48,7 @@ const outputPrefix = "pip: "
 type Reporter = toolenv.Reporter
 
 // ref returns the pip requirement string ("name==version" or "name").
-func ref(p model.PipPackage) string {
+func ref(p model.Package) string {
 	if p.Version == "" {
 		return p.Name
 	}
@@ -63,10 +63,10 @@ func BinDir(venvDir string) string {
 }
 
 // Install ensures a venv exists at venvDir and installs the given packages into
-// it (each PipPackage.Version is the exact spec to install), using the Python
+// it (each Package.Version is the exact spec to install), using the Python
 // interpreter from the mise toolchain dirs. It returns each package's resolved
 // concrete version. When out is non-nil, pip's output is streamed live.
-func Install(pkgs []model.PipPackage, venvDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
+func Install(pkgs []model.Package, venvDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
 	if len(pkgs) == 0 {
 		return nil, nil
 	}

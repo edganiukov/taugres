@@ -27,7 +27,7 @@ import (
 // Fresh reports whether every package is already installed at its locked version
 // — the prefix's node_modules exists and each package's recorded spec is
 // unchanged and resolved — so Install (and its registry access) can be skipped.
-func Fresh(pkgs []model.NpmPackage, npmDir string, locked map[string]lock.Entry) bool {
+func Fresh(pkgs []model.Package, npmDir string, locked map[string]lock.Entry) bool {
 	if len(pkgs) == 0 {
 		return true // nothing declared -> nothing to install
 	}
@@ -49,7 +49,7 @@ const outputPrefix = "npm: "
 type Reporter = toolenv.Reporter
 
 // ref returns the npm package spec ("name@version" or "name").
-func ref(p model.NpmPackage) string {
+func ref(p model.Package) string {
 	if p.Version == "" {
 		return p.Name
 	}
@@ -64,10 +64,10 @@ func BinDir(npmDir string) string {
 }
 
 // Install installs the given packages into the project-local npm prefix at
-// npmDir (each NpmPackage.Version is the exact spec to install), using npm/node
+// npmDir (each Package.Version is the exact spec to install), using npm/node
 // from the mise toolchain dirs. It returns each package's resolved concrete
 // version. When out is non-nil, npm's output is streamed live.
-func Install(pkgs []model.NpmPackage, npmDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
+func Install(pkgs []model.Package, npmDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
 	if len(pkgs) == 0 {
 		return nil, nil
 	}

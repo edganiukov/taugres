@@ -23,7 +23,7 @@ import (
 // Fresh reports whether every package is already installed at its locked version
 // — the venv exists and each package's recorded spec is unchanged and resolved —
 // so Install (and its network access) can be skipped.
-func Fresh(pkgs []model.UvPackage, venvDir string, locked map[string]lock.Entry) bool {
+func Fresh(pkgs []model.Package, venvDir string, locked map[string]lock.Entry) bool {
 	if len(pkgs) == 0 {
 		return true // nothing declared -> nothing to install
 	}
@@ -45,7 +45,7 @@ const outputPrefix = "uv: "
 type Reporter = toolenv.Reporter
 
 // ref returns the requirement string ("name==version" or "name").
-func ref(p model.UvPackage) string {
+func ref(p model.Package) string {
 	if p.Version == "" {
 		return p.Name
 	}
@@ -58,10 +58,10 @@ func BinDir(venvDir string) string {
 }
 
 // Install ensures a uv venv exists at venvDir and installs the given packages
-// into it (each UvPackage.Version is the exact spec), using uv/python from the
+// into it (each Package.Version is the exact spec), using uv/python from the
 // mise toolchain dirs. It returns each package's resolved concrete version.
 // When out is non-nil, uv's output is streamed live.
-func Install(pkgs []model.UvPackage, venvDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
+func Install(pkgs []model.Package, venvDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
 	if len(pkgs) == 0 {
 		return nil, nil
 	}

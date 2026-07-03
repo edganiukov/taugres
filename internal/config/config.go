@@ -80,9 +80,9 @@ type builder struct {
 
 	miseTools   []model.MiseTool
 	miseJobs    int
-	pipPackages []model.PipPackage
-	npmPackages []model.NpmPackage
-	uvPackages  []model.UvPackage
+	pipPackages []model.Package
+	npmPackages []model.Package
+	uvPackages  []model.Package
 
 	aliases     map[string]string
 	sourceFuncs map[string][]model.SourceFunc
@@ -398,7 +398,7 @@ func (b *builder) pipInstallFn(_ *starlark.Thread, fn *starlark.Builtin, args st
 		return nil, err
 	}
 	for _, s := range specs {
-		b.pipPackages = append(b.pipPackages, model.PipPackage{Name: s.name, Version: s.version})
+		b.pipPackages = append(b.pipPackages, model.Package{Name: s.name, Version: s.version})
 	}
 	return starlark.None, nil
 }
@@ -409,7 +409,7 @@ func (b *builder) npmInstallFn(_ *starlark.Thread, fn *starlark.Builtin, args st
 		return nil, err
 	}
 	for _, s := range specs {
-		b.npmPackages = append(b.npmPackages, model.NpmPackage{Name: s.name, Version: s.version})
+		b.npmPackages = append(b.npmPackages, model.Package{Name: s.name, Version: s.version})
 	}
 	return starlark.None, nil
 }
@@ -420,7 +420,7 @@ func (b *builder) uvInstallFn(_ *starlark.Thread, fn *starlark.Builtin, args sta
 		return nil, err
 	}
 	for _, s := range specs {
-		b.uvPackages = append(b.uvPackages, model.UvPackage{Name: s.name, Version: s.version})
+		b.uvPackages = append(b.uvPackages, model.Package{Name: s.name, Version: s.version})
 	}
 	return starlark.None, nil
 }
