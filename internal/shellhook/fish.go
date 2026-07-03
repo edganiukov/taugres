@@ -167,18 +167,15 @@ function _tau_hook --on-variable PWD
         end
     end
 
-    # No activation script yet. The guarded sync above already printed the
-    # specific reason exactly once for these inputs (untrusted -> \x60tau allow\x60, or
-    # a config/tool error). Stay silent rather than nagging \x60tau sync\x60 on every
-    # prompt — that advice is also wrong for an untrusted project.
-    if test ! -f "$activate"
-        return 0
-    end
-
     # (Re)activate on entering/switching, or when the generated env changed.
     # Activation is delegated to \x60tau activate\x60, which refuses to emit a script
     # for a project not trusted on THIS machine, so a cloned repo cannot run code
     # on cd. Trust lives outside the repo and cannot be forged by repo contents.
+    #
+    # \x60tau activate\x60 is also the single voice that explains why a project isn't
+    # active — "not trusted; run \x60tau allow\x60", or "no script; run \x60tau sync\x60" — so
+    # the auto-sync above stays quiet about trust. Guarded by _TAU_ACT_TOKEN (the
+    # activate mtime, empty when absent) so it speaks at most once per state.
     set -l stamp (_tau_mtime "$activate")
     set -l acttok "$proj|$stamp"
     if test "$acttok" != "$_TAU_ACT_TOKEN"

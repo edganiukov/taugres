@@ -334,6 +334,64 @@ echo "SCOPE=${SCOPE:-unset}"`
 	}
 }
 
+// TestUntrustedEntryPrintsSingleTrustMessage guards against the double-message
+// regression: entering an untrusted project that is also stale used to print
+// both `tau sync`'s and `tau activate`'s trust messages. Now the auto-sync bails
+// silently for untrusted projects and `tau activate` is the single voice.
+func TestUntrustedEntryPrintsSingleTrustMessage(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	tau := builtTau(t)
+	cfgHome := t.TempDir()
+	cacheHome := t.TempDir()
+	env := append(os.Environ(), "XDG_CONFIG_HOME="+cfgHome, "XDG_CACHE_HOME="+cacheHome)
+
+	repo := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, repo, "workspace.tg", "project(\"demo\")\nshell.env(\"SCOPE\", \"root\")\n")
+	runTau := func(args ...string) {
+		t.Helper()
+		c := exec.Command(tau, args...)
+		c.Dir = repo
+		c.Env = env
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("tau %v: %v\n%s", args, err, out)
+		}
+	}
+	// Trust + sync so a manifest/activate script exist, then deny and edit the
+	// config so the next entry is BOTH stale (would trigger auto-sync) and
+	// untrusted (would hit both trust gates).
+	runTau("allow")
+	runTau("sync")
+	runTau("deny")
+	testutil.WriteFile(t, repo, "workspace.tg", "project(\"demo\")\nshell.env(\"SCOPE\", \"changed\")\n")
+
+	hookCmd := exec.Command(tau, "hook", "bash")
+	hookCmd.Env = env
+	hookOut, err := hookCmd.Output()
+	if err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+	// Start in a neutral dir so the hook's install-time run doesn't fire here.
+	script := "cd " + t.TempDir() + "\n" + string(hookOut) + `
+prompt() { local c; for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done; }
+cd "` + repo + `"; prompt`
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", script)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash: %v\n%s", err, out)
+	}
+	got := string(out)
+	if n := strings.Count(got, "not trusted"); n != 1 {
+		t.Errorf("expected exactly one not-trusted message, got %d:\n%s", n, got)
+	}
+	if strings.Contains(got, "SCOPE=changed") || strings.Contains(got, "run `tau sync`") {
+		t.Errorf("untrusted entry should not activate or nag tau sync:\n%s", got)
+	}
+}
+
 // TestConcurrentEntryWaitsForInProgressSync reproduces the two-shells race: a
 // slow sync is running (holding the lock) when a second shell enters. The
 // second shell's hook must shell out to tau, block on the lock, and only

@@ -177,6 +177,22 @@ func runSync(e *Env, args []string) int {
 	}
 	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
 
+	// Trust gate first: an untrusted project can never sync (activation would
+	// source shell.fn/shell.hook files and run installs), so bail before any
+	// lock, Starlark eval, or tool work. In hook mode (--if-stale) stay silent —
+	// `tau activate` is the single voice that tells the user to run `tau allow`;
+	// only a manual `tau sync` says so itself.
+	allowed, err := trust.IsAllowed(d.ConfigPath)
+	if err != nil {
+		return fail(e, "checking trust: %v", err)
+	}
+	if !allowed {
+		if *ifStale {
+			return 0
+		}
+		return fail(e, "project is not trusted; review the config, then run `tau allow`")
+	}
+
 	// Serialize syncs for this project: only one runs at a time; others wait.
 	// Show the wait as a transient spinner line so it is cleared once we
 	// proceed (and thus overwritten by the activation/synced message).
@@ -225,16 +241,6 @@ func runSync(e *Env, args []string) int {
 			fmt.Fprintf(e.Stderr, "tau: error: %s\n", errMsg)
 		}
 		return fail(e, "config has validation errors; run `tau check` for details")
-	}
-
-	// Trust gate: refuse to (re)generate scripts for untrusted projects, since
-	// activation sources fn.source files and runs mise installs.
-	allowed, err := trust.IsAllowed(d.ConfigPath)
-	if err != nil {
-		return fail(e, "checking trust: %v", err)
-	}
-	if !allowed {
-		return fail(e, "project is not trusted; review the config, then run `tau allow`")
 	}
 
 	plan := res.Plan
