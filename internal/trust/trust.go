@@ -25,11 +25,18 @@ type record struct {
 	AllowedAt  string `json:"allowedAt"`
 }
 
-// storeDir returns the directory holding trust records.
+// storeDir returns the directory holding trust records. It honors
+// XDG_CONFIG_HOME on every platform so the trust location is predictable (and
+// test-isolable), falling back to the OS default otherwise — os.UserConfigDir
+// ignores XDG_CONFIG_HOME on macOS (it always uses ~/Library/Application
+// Support), which the fallback preserves when the variable is unset.
 func storeDir() (string, error) {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		var err error
+		if base, err = os.UserConfigDir(); err != nil {
+			return "", err
+		}
 	}
 	return filepath.Join(base, "taugres", "trust"), nil
 }
