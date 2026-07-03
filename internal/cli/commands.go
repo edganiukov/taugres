@@ -215,10 +215,10 @@ func runSync(e *Env, args []string) int {
 	// activation sources fn.source files and runs mise installs.
 	allowed, err := trust.IsAllowed(d.ConfigPath)
 	if err != nil {
-		return fail(e, "tau: checking trust: %v", err)
+		return fail(e, "checking trust: %v", err)
 	}
 	if !allowed {
-		return fail(e, "tau: project is not trusted\nreview the config, then run `tau allow`")
+		return fail(e, "project is not trusted; review the config, then run `tau allow`")
 	}
 
 	plan := res.Plan

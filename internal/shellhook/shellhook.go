@@ -181,10 +181,11 @@ _tau_hook() {
     fi
   fi
 
-  if [ ! -f "$activate" ]; then
-    printf 'tau: environment is not synced; run \x60tau sync\x60\n' >&2
-    return 0
-  fi
+  # No activation script yet. The guarded sync above already printed the
+  # specific reason exactly once for these inputs (untrusted -> \x60tau allow\x60, or
+  # a config/tool error). Stay silent rather than nagging \x60tau sync\x60 on every
+  # prompt — that advice is also wrong for an untrusted project.
+  [ -f "$activate" ] || return 0
 
   # (Re)activate on entering/switching projects, or when the generated env
   # changed (activate regenerated -> newer mtime). Activation is delegated to
