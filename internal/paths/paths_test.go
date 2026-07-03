@@ -52,18 +52,3 @@ func TestNestedResolvesToRepoRoot(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
-
-func TestIsRootAnchored(t *testing.T) {
-	cases := map[string]bool{
-		"//foo":  true,
-		"/abs":   true,
-		"foo":    false,
-		"./foo":  false,
-		"../foo": false,
-	}
-	for in, want := range cases {
-		if got := IsRootAnchored(in); got != want {
-			t.Errorf("IsRootAnchored(%q) = %v, want %v", in, got, want)
-		}
-	}
-}

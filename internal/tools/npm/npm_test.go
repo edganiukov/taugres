@@ -67,9 +67,3 @@ func TestInstallNoPackagesIsNoop(t *testing.T) {
 		t.Errorf("empty install should be a no-op, got %v", err)
 	}
 }
-
-func TestBinDir(t *testing.T) {
-	if got := BinDir("/p/.taugres/tools/npm"); got != filepath.FromSlash("/p/.taugres/tools/npm/bin") {
-		t.Errorf("BinDir = %q", got)
-	}
-}

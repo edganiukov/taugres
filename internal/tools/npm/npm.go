@@ -56,13 +56,6 @@ func ref(p model.Package) string {
 	return p.Name + "@" + p.Version
 }
 
-// BinDir returns the bin directory inside an npm prefix. This is what activation
-// prepends to PATH; no symlinking is needed since the prefix lives under
-// .taugres/ already.
-func BinDir(npmDir string) string {
-	return filepath.Join(npmDir, "bin")
-}
-
 // Install installs the given packages into the project-local npm prefix at
 // npmDir (each Package.Version is the exact spec to install), using npm/node
 // from the mise toolchain dirs. It returns each package's resolved concrete

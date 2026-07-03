@@ -3,7 +3,6 @@
 package validate
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,14 +27,6 @@ type Report struct {
 
 // HasErrors reports whether any hard errors were found.
 func (r *Report) HasErrors() bool { return len(r.Errors) > 0 }
-
-// Err returns a combined error if there are errors, else nil.
-func (r *Report) Err() error {
-	if !r.HasErrors() {
-		return nil
-	}
-	return errors.New(r.Errors[0])
-}
 
 // Validate checks the plan and returns a report.
 func Validate(p *model.Plan) *Report {

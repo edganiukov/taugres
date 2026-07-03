@@ -39,9 +39,3 @@ func Resolve(input, repoRoot string) (string, error) {
 	}
 	return "", &ErrRelative{Input: input}
 }
-
-// IsRootAnchored reports whether input is a "//"-anchored or absolute path,
-// without resolving it.
-func IsRootAnchored(input string) bool {
-	return strings.HasPrefix(input, "//") || filepath.IsAbs(input)
-}
