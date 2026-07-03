@@ -320,6 +320,7 @@ no subprocess) while Go reads the same file:
 input:<sha256>:<abs-path>     a config input (config file, load(...) module, shell.fn/shell.hook file)
 tooldir:<abs-path>            a tool bin dir that must exist
 probe:<kind>|<arg>|<result>   an exists()/which() observation
+toolsig:<mgr>:<sha256>        per-manager fingerprint of its tools + locked versions
 ```
 
 | Dimension | Drift when… |
@@ -327,6 +328,10 @@ probe:<kind>|<arg>|<result>   an exists()/which() observation
 | input | a config input's mtime is newer than the manifest (hook) or its content hash changed (`tau status`) |
 | tooldir | a recorded tool bin dir (mise store, pip/uv venv, npm prefix) is missing |
 | probe | an `exists()`/`which()` result changed (a probed file appeared/vanished, a binary was installed/removed) |
+
+The first three are the **env-trigger** dimensions the hook reads to decide
+*whether* to sync. The `toolsig` lines are **Go-only** (the hook ignores unknown
+tags) and drive *what work* a sync does — see Per-manager staleness.
 
 The manifest's own mtime is the "last synced" anchor. On each prompt the hook
 makes **one pass** over the file, dispatching by line tag with builtins only
@@ -425,17 +430,23 @@ PATH, aliases, functions) is always generated so the shell still works, and the
 tool can be retried. Tool output is shown only with `tau sync --verbose`;
 otherwise a single spinner line reports progress.
 
-**Per-tool staleness.** A sync often runs for a reason unrelated to tools (a
-probe flip, an edited alias, `--if-stale`). Each manager therefore owns a
-freshness check — `mise.Fresh`, `pip.Fresh`, `npm.Fresh`, `uv.Fresh` (in the
-tool packages, next to their installers) — and its install is skipped entirely,
-touching no network, when its declared set is unchanged from the lock and its
-artifacts are present. This is a distinct *group* from the env-trigger checks
-(the input/tooldir/probe dimensions in `internal/state`, which decide whether to
-sync at all): the env checks decide *whether* to sync; the tool checks decide
-*what work* the sync does. `--update` forces every manager. To keep the mise check offline
-(no `mise where`), the resolved store bin dir is cached in each mise lock entry
-(`binDir`); pip/uv/npm bin dirs are deterministic project-local paths.
+**Per-manager staleness.** A sync often runs for a reason unrelated to tools (a
+probe flip, an edited alias, `--if-stale`). Each manager therefore carries a
+**signature** in the manifest — `toolsig:<mgr>:<sha256>`, a hash of its declared
+tools/packages joined with their locked versions. A manager is fresh (its
+install skipped, touching no network) when `--update` is unset, it was not added
+or dropped since the last sync, its signature is unchanged, and its bin dirs are
+present; when every manager is fresh the whole install phase is skipped and only
+the shell scripts regenerate. This is a distinct *group* from the env-trigger
+checks (the input/tooldir/probe dimensions in `internal/state`): the env checks
+decide *whether* to sync; the signatures decide *what work* the sync does.
+`--update` forces every manager.
+
+The signatures subsume per-manager freshness, so there are no separate `Fresh()`
+helpers. mise stays offline too: its store bin dirs are recovered from the
+recorded `tooldir:` lines (the pip/uv/npm dirs are deterministic project-local
+paths, so subtracting them leaves the mise dirs) and reused for PATH when mise is
+fresh — so an unchanged mise is never re-probed with `mise where`.
 
 If `mise` is missing, tool installs are skipped with a clear message and the env
 is still generated.
