@@ -64,13 +64,17 @@ end
 function _tau_hook --on-variable PWD
     set -l proj (_tau_find_config)
 
-    # Outside any project: tear down an active env and stop.
+    # Outside any project: tear down an active env and stop. Only clear the
+    # activation token when something was actually active — so returning to a
+    # project we never activated (e.g. an untrusted one) does not re-run
+    # \x60tau activate\x60 and re-print its "not trusted" notice; that notice then
+    # shows once per shell, not on every cd back in.
     if test -z "$proj"
         if set -q _TAU_ACTIVE_ROOT; and test -n "$_TAU_ACTIVE_ROOT"
             _tau_deactivate "$_TAU_ACTIVE_ROOT"
             set -e _TAU_ACTIVE_ROOT
+            set -e _TAU_ACT_TOKEN
         end
-        set -e _TAU_ACT_TOKEN
         return 0
     end
 
@@ -152,6 +156,7 @@ function _tau_hook --on-variable PWD
                 _tau_deactivate "$proj"
                 set -e _TAU_ACTIVE_ROOT
             end
+            set -l _tau_pre (_tau_mtime "$activate")
             if pushd "$proj" 2>/dev/null
                 $_TAU_BIN sync --if-stale
                 popd
@@ -160,10 +165,13 @@ function _tau_hook --on-variable PWD
             # below rather than trust activate's mtime, whose 1s granularity can
             # miss a same-second resync.
             set -e _TAU_ACT_TOKEN
-            # If the sync produced the env, clear the retry guard so a later
-            # teardown (e.g. rm -rf .taugres) syncs again. If not (genuine
-            # failure), keep it so the same inputs are not retried every prompt.
-            test -f "$activate"; and set -e _TAU_TRIED
+            # Clear the retry guard only if the sync actually (re)generated the
+            # env — the activate mtime changed — so a later teardown (rm -rf
+            # .taugres) syncs again. A no-op sync (e.g. an untrusted project that
+            # cannot sync, leaving a pre-existing activate script untouched) keeps
+            # the guard, so it is not retried — and re-activated — every prompt.
+            set -l _tau_post (_tau_mtime "$activate")
+            test -n "$_tau_post"; and test "$_tau_pre" != "$_tau_post"; and set -e _TAU_TRIED
         end
     end
 

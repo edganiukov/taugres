@@ -97,13 +97,17 @@ _tau_hook() {
   local proj gen_dir activate manifest
   proj="$(_tau_find_config)"
 
-  # Outside any project: tear down an active env and stop.
+  # Outside any project: tear down an active env and stop. Only clear the
+  # activation token when something was actually active — so returning to a
+  # project we never activated (e.g. an untrusted one) does not re-run
+  # \x60tau activate\x60 and re-print its "not trusted" notice; that notice then
+  # shows once per shell, not on every cd back in.
   if [ -z "$proj" ]; then
     if [ -n "${_TAU_ACTIVE_ROOT:-}" ]; then
       _tau_deactivate "$_TAU_ACTIVE_ROOT"
       unset _TAU_ACTIVE_ROOT
+      unset _TAU_ACT_TOKEN
     fi
-    unset _TAU_ACT_TOKEN
     return 0
   fi
 
@@ -169,15 +173,19 @@ _tau_hook() {
         _tau_deactivate "$proj"
         unset _TAU_ACTIVE_ROOT
       fi
+      local _tau_pre; _tau_pre="$(_tau_mtime "$activate")"
       ( cd "$proj" && "$_TAU_BIN" sync --if-stale )
       # The sync may have regenerated the env; force the (re)activation below
       # rather than trust activate's mtime, whose 1s granularity can miss a
       # same-second resync.
       unset _TAU_ACT_TOKEN
-      # If the sync produced the env, clear the retry guard so a later teardown
-      # (e.g. rm -rf .taugres) syncs again. If it did not (genuine failure),
-      # keep the guard so the same inputs are not retried every prompt.
-      [ -f "$activate" ] && unset _TAU_TRIED
+      # Clear the retry guard only if the sync actually (re)generated the env —
+      # the activate mtime changed — so a later teardown (rm -rf .taugres) syncs
+      # again. A no-op sync (e.g. an untrusted project that cannot sync, leaving a
+      # pre-existing activate script untouched) keeps the guard, so it is not
+      # retried — and re-activated — on every prompt.
+      local _tau_post; _tau_post="$(_tau_mtime "$activate")"
+      [ -n "$_tau_post" ] && [ "$_tau_pre" != "$_tau_post" ] && unset _TAU_TRIED
     fi
   fi
 

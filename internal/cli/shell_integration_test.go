@@ -374,9 +374,12 @@ func TestUntrustedEntryPrintsSingleTrustMessage(t *testing.T) {
 		t.Fatalf("hook: %v", err)
 	}
 	// Start in a neutral dir so the hook's install-time run doesn't fire here.
+	// Prompt several times: the notice must appear once, not on every prompt (the
+	// stale + pre-existing activate script combination used to re-sync and
+	// re-activate — and thus re-print — on each prompt).
 	script := "cd " + t.TempDir() + "\n" + string(hookOut) + `
 prompt() { local c; for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done; }
-cd "` + repo + `"; prompt`
+cd "` + repo + `"; for i in 1 2 3 4 5; do prompt; done`
 	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", script)
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
@@ -389,6 +392,47 @@ cd "` + repo + `"; prompt`
 	}
 	if strings.Contains(got, "SCOPE=changed") || strings.Contains(got, "run `tau sync`") {
 		t.Errorf("untrusted entry should not activate or nag tau sync:\n%s", got)
+	}
+}
+
+// TestUntrustedNoticeOncePerShell verifies the not-trusted notice fires once per
+// shell — on first entry — and not again when cd-ing out of and back into the
+// untrusted project.
+func TestUntrustedNoticeOncePerShell(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	tau := builtTau(t)
+	cfgHome := t.TempDir()
+	cacheHome := t.TempDir()
+	env := append(os.Environ(), "XDG_CONFIG_HOME="+cfgHome, "XDG_CACHE_HOME="+cacheHome)
+
+	repo := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, repo, "workspace.tg", "project(\"demo\")\nshell.env(\"SCOPE\", \"root\")\n")
+	// Untrusted (never `tau allow`).
+
+	hookCmd := exec.Command(tau, "hook", "bash")
+	hookCmd.Env = env
+	hookOut, err := hookCmd.Output()
+	if err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+	neutral := t.TempDir()
+	script := "cd " + neutral + "\n" + string(hookOut) + `
+prompt() { local c; for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done; }
+cd "` + repo + `"; prompt   # first entry -> one notice
+prompt                       # same dir -> silent
+cd "` + neutral + `"; prompt # leave
+cd "` + repo + `"; prompt` // return -> must stay silent
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", script)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash: %v\n%s", err, out)
+	}
+	if n := strings.Count(string(out), "not trusted"); n != 1 {
+		t.Errorf("expected the not-trusted notice exactly once per shell, got %d:\n%s", n, out)
 	}
 }
 
