@@ -1131,11 +1131,25 @@ func runHook(e *Env, args []string) int {
 	return 0
 }
 
-// --- activate ---
+// --- activate / deactivate ---
 
-func runActivate(e *Env, args []string) int {
+func runActivate(e *Env, args []string) int   { return emitGenScript(e, args, "activate") }
+func runDeactivate(e *Env, args []string) int { return emitGenScript(e, args, "deactivate") }
+
+// emitGenScript prints the generated activate/deactivate script for the current
+// project to stdout, so the shell hook (or a user) can `eval` it. It runs on the
+// hot path (every project entry) and does no staleness check: the hook re-syncs
+// on change before calling it, and `tau status` reports staleness.
+//
+// activate is trust-gated — the hook sources this stdout, so refusing an
+// untrusted project is the security boundary (trust lives outside the repo, so a
+// clone can't forge it and can't run code on cd). deactivate is not gated: it
+// only restores saved env/PATH and removes tau-created aliases/functions (no user
+// hook code), so tearing down must always work — even after `tau deny` — and its
+// guards make sourcing it a no-op when nothing was active.
+func emitGenScript(e *Env, args []string, kind string) int {
 	if len(args) != 1 {
-		return fail(e, "usage: tau activate <shell> (bash|zsh|fish)")
+		return fail(e, "usage: tau %s <shell> (bash|zsh|fish)", kind)
 	}
 	shell := args[0]
 	if !slices.Contains(render.SupportedShells, shell) {
@@ -1146,28 +1160,22 @@ func runActivate(e *Env, args []string) int {
 		return fail(e, "%v", err)
 	}
 
-	// Trust gate: the shell hook sources this command's stdout, so refusing to
-	// print the script for an untrusted project is the security boundary. Trust
-	// lives outside the repo (a repo cannot forge it), so a freshly-cloned
-	// project activates nothing until the user runs `tau allow` on this machine.
-	allowed, err := trust.IsAllowed(d.ConfigPath)
-	if err != nil {
-		return fail(e, "checking trust: %v", err)
-	}
-	if !allowed {
-		return fail(e, "project is not trusted; run `tau allow`")
+	if kind == "activate" {
+		allowed, err := trust.IsAllowed(d.ConfigPath)
+		if err != nil {
+			return fail(e, "checking trust: %v", err)
+		}
+		if !allowed {
+			return fail(e, "project is not trusted; run `tau allow`")
+		}
 	}
 
 	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
-	activate := filepath.Join(state.GenDir(stateDir), "activate."+shell)
-	data, err := os.ReadFile(activate)
+	script := filepath.Join(state.GenDir(stateDir), kind+"."+shell)
+	data, err := os.ReadFile(script)
 	if err != nil {
-		return fail(e, "no generated activation script for %s; run `tau sync`", shell)
+		return fail(e, "no generated %s script for %s; run `tau sync`", kind, shell)
 	}
-	// This runs on the activation hot path (every project entry). It deliberately
-	// does no staleness check: the shell hook already re-syncs on change before
-	// calling this, and `tau status` reports staleness. Just emit the script to
-	// stdout so `eval "$(tau activate zsh)"` works.
 	fmt.Fprint(e.Stdout, string(data))
 	return 0
 }

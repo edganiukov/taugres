@@ -58,6 +58,8 @@ func dispatch(e *Env, cmd string, rest []string) int {
 		return runHook(e, rest)
 	case "activate":
 		return runActivate(e, rest)
+	case "deactivate":
+		return runDeactivate(e, rest)
 	case "allow":
 		return runAllow(e, rest)
 	case "deny":
@@ -94,6 +96,7 @@ Usage:
   tau prune                  remove trust records for projects that no longer exist
   tau hook <shell>           print the shell hook (bash|zsh|fish)
   tau activate <shell>       print the activation script for a trusted project
+  tau deactivate <shell>     print the deactivation script for the active project
   tau version                print version
 
 Flags:

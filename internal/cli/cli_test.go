@@ -266,6 +266,36 @@ func TestActivateRejectsUnsupportedShell(t *testing.T) {
 	}
 }
 
+func TestDeactivatePrintsScript(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nshell.env(\"A\", \"b\")\n")
+	run(t, dir, "allow")
+	run(t, dir, "sync")
+
+	code, out, errOut := run(t, dir, "deactivate", "bash")
+	if code != 0 {
+		t.Fatalf("deactivate exit %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, "restore environment") {
+		t.Errorf("deactivate did not print the teardown script:\n%s", out)
+	}
+	if errOut != "" {
+		t.Errorf("unexpected stderr: %s", errOut)
+	}
+
+	// Unlike activate, deactivate is not trust-gated: teardown must work even
+	// after trust is revoked.
+	run(t, dir, "deny")
+	code, out, errOut = run(t, dir, "deactivate", "bash")
+	if code != 0 {
+		t.Fatalf("deactivate after deny exit %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, "restore environment") {
+		t.Errorf("deactivate should still emit the script after deny:\n%s", out)
+	}
+}
+
 func TestHookOutput(t *testing.T) {
 	isolate(t)
 	code, out, _ := run(t, t.TempDir(), "hook", "zsh")
