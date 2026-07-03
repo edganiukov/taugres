@@ -55,6 +55,9 @@ project("my-app")
 shell.env("DATABASE_URL", "postgres://localhost/app")
 shell.unset("PYTHONPATH")
 
+# Load KEY=VALUE pairs from a .env file (values literal, no $ expansion).
+shell.dotenv("//.env")
+
 # Paths are repository-root anchored with //.
 shell.path.prepend("//node_modules/.bin")
 shell.path.append("//scripts")
@@ -80,9 +83,9 @@ All shell-facing configuration lives under the `shell` namespace (`shell.env`,
 to `PATH` explicitly, e.g. `shell.path.prepend("//bin")`. Reusable helpers can be
 loaded: `load("//taugres/lib/node.tg", "node_project")`.
 
-### Conditional config: `exists` and `which`
+### Conditional config: `exists`, `which`, and `env`
 
-Two read-only host probes let a config adapt to what's on the machine:
+Three read-only host probes let a config adapt to what's on the machine:
 
 ```python
 # exists(path) -> bool: is a root-anchored ("//…") or absolute path on disk?
@@ -96,17 +99,25 @@ if which("docker"):
 go = which("go")   # "/usr/bin/go" or None
 if go:
     shell.env("GOBIN", go)
+
+# env(name, default="") -> a process env var's value, or the default when unset.
+if env("CI"):
+    mise.jobs(4)
+shell.env("PROFILE", env("TAU_PROFILE", "dev"))
 ```
 
-Both only *read* the environment — they never run a command or write anything.
-Because their result depends on the host filesystem/PATH, treat them as an escape
-hatch: a config that branches on them is only as reproducible as what it probes.
+They only *read* the environment — never run a command or write anything.
+Because their result depends on the host filesystem/PATH/environment, treat them
+as an escape hatch: a config that branches on them is only as reproducible as
+what it probes.
 
 Probe results are recorded at sync time and re-checked on every in-project
-prompt, so creating the probed file or installing the binary auto-syncs on your
-next prompt just like a config edit does. (`which` detection is by presence; a
-binary that *moves* without a presence change is picked up by `tau
-status`/manual sync.)
+prompt, so creating the probed file, installing the binary, or changing the env
+var auto-syncs on your next prompt just like a config edit does. (`which`
+detection is by presence; a binary that *moves* without a presence change is
+picked up by `tau status`/manual sync. `env` values are recorded as a hash, so
+secrets never land in `.taugres/`. Avoid probing a variable tau itself mutates,
+like `PATH`, or it will re-sync on every activation.)
 
 ## Tools and packages
 
@@ -219,6 +230,7 @@ tools live in mise's shared store, so only their lock entry is dropped.
 | `tau check` | evaluate + validate config, report warnings/errors |
 | `tau sync [--verbose] [--update]` | evaluate config, install tools, generate shell scripts (requires trust) |
 | `tau update [name...]` | re-resolve unpinned tools/packages to latest (all, or just those named; `<manager>:name` to disambiguate) |
+| `tau exec [--] <cmd>...` | run a command with the project env/PATH applied, no shell hook (requires trust) |
 | `tau status` | show active project, sync state, and trust |
 | `tau hook <shell>` | print the shell hook (bash, zsh, fish) |
 | `tau hook-env <shell>` | used by the hook: print env/activation commands for this prompt |

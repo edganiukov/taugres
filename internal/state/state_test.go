@@ -68,6 +68,38 @@ func TestCheckStaleDetectsConfigChange(t *testing.T) {
 	}
 }
 
+func TestCheckStaleDetectsEnvProbeDrift(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	cfg := testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\n")
+	stateDir := filepath.Join(dir, ".taugres")
+	hash, _ := HashFile(cfg)
+
+	t.Setenv("TAU_TEST_VAR", "one")
+	m := &Manifest{
+		Inputs: map[string]string{cfg: hash},
+		Probes: []model.Probe{{Kind: "env", Arg: "TAU_TEST_VAR", Result: model.EnvProbeResult("one", true)}},
+	}
+	if err := m.Write(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, dir, ".taugres/gen/activate.bash", "x")
+	testutil.WriteFile(t, dir, ".taugres/gen/deactivate.bash", "x")
+
+	if r := CheckStale(stateDir, []string{"bash"}); r.Stale {
+		t.Errorf("should be fresh when env var unchanged: %s", r.Reason)
+	}
+	// Change the observed env var -> stale.
+	t.Setenv("TAU_TEST_VAR", "two")
+	if r := CheckStale(stateDir, []string{"bash"}); !r.Stale {
+		t.Error("expected stale after env var changed")
+	}
+	// Unsetting is also drift.
+	os.Unsetenv("TAU_TEST_VAR")
+	if r := CheckStale(stateDir, []string{"bash"}); !r.Stale {
+		t.Error("expected stale after env var unset")
+	}
+}
+
 func TestCheckStaleMissingManifest(t *testing.T) {
 	dir := testutil.TempWorkspace(t)
 	stateDir := filepath.Join(dir, ".taugres")

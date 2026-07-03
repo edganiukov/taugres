@@ -250,6 +250,97 @@ if not which("tau-definitely-absent-xyz"):
 	}
 }
 
+func TestEnvProbe(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	t.Setenv("TAU_TEST_CI", "1")
+	t.Setenv("TAU_TEST_EMPTY", "")
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+if env("TAU_TEST_CI"):
+    shell.env("IN_CI", "yes")
+shell.env("PROFILE", env("TAU_TEST_PROFILE", "dev"))
+# A set-but-empty var is falsy.
+if not env("TAU_TEST_EMPTY"):
+    shell.env("EMPTY_FALSY", "yes")
+`)
+	res := evalWorkspace(t, dir)
+	p := res.Plan
+	if p.EnvSet["IN_CI"] != "yes" {
+		t.Errorf("env(set) should be truthy")
+	}
+	if p.EnvSet["PROFILE"] != "dev" {
+		t.Errorf("env(unset, default) = %q, want dev", p.EnvSet["PROFILE"])
+	}
+	if p.EnvSet["EMPTY_FALSY"] != "yes" {
+		t.Errorf("env(set-but-empty) should be falsy")
+	}
+
+	// The observations are recorded as probes for stale detection, with the value
+	// hashed (never stored raw).
+	var ci *model.Probe
+	for i := range res.Probes {
+		if res.Probes[i].Kind == "env" && res.Probes[i].Arg == "TAU_TEST_CI" {
+			ci = &res.Probes[i]
+		}
+	}
+	if ci == nil {
+		t.Fatalf("env probe not recorded: %+v", res.Probes)
+	}
+	if ci.Result == "" || ci.Result == "1" {
+		t.Errorf("env probe result should be a value hash, got %q", ci.Result)
+	}
+	if ci.Result != model.EnvProbeResult("1", true) {
+		t.Errorf("env probe result = %q, want hash of %q", ci.Result, "1")
+	}
+}
+
+func TestDotenv(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, ".env", `
+# a comment
+export TOKEN=abc123
+DATABASE_URL=postgres://localhost/app
+QUOTED="a b	c"
+LITERAL='keep $HOME literal'
+`)
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+shell.dotenv("//.env")
+shell.env("DERIVED", "$TOKEN")
+`)
+	res := evalWorkspace(t, dir)
+	p := res.Plan
+	if p.EnvSet["TOKEN"] != "abc123" {
+		t.Errorf("TOKEN = %q", p.EnvSet["TOKEN"])
+	}
+	if p.EnvSet["DATABASE_URL"] != "postgres://localhost/app" {
+		t.Errorf("DATABASE_URL = %q", p.EnvSet["DATABASE_URL"])
+	}
+	if p.EnvSet["QUOTED"] != "a b\tc" {
+		t.Errorf("QUOTED = %q", p.EnvSet["QUOTED"])
+	}
+	if p.EnvSet["LITERAL"] != "keep $HOME literal" {
+		t.Errorf("LITERAL = %q (single quotes should be literal)", p.EnvSet["LITERAL"])
+	}
+	// A later shell.env can expand a var loaded from the dotenv file.
+	if p.EnvSet["DERIVED"] != "abc123" {
+		t.Errorf("DERIVED = %q, want abc123", p.EnvSet["DERIVED"])
+	}
+	// The .env file is tracked as a config input for stale detection.
+	if len(res.DotenvFiles) != 1 || res.DotenvFiles[0] != filepath.Join(dir, ".env") {
+		t.Errorf("DotenvFiles = %v", res.DotenvFiles)
+	}
+}
+
+func TestDotenvMissingFileErrors(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nshell.dotenv(\"//.env\")\n")
+	d, _ := discover.Discover(dir)
+	if _, err := Evaluate(d); err == nil {
+		t.Error("expected error for missing .env file")
+	}
+}
+
 func TestMiseJobs(t *testing.T) {
 	dir := testutil.TempWorkspace(t)
 	// Default is defaultMiseJobs when mise.jobs is not called.

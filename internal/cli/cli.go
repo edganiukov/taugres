@@ -14,6 +14,7 @@ const Version = "0.0.1-alpha"
 // Env carries process context so commands are testable.
 type Env struct {
 	Args   []string // args after the program name
+	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
 	Wd     string // working directory
@@ -24,6 +25,7 @@ func DefaultEnv() *Env {
 	wd, _ := os.Getwd()
 	return &Env{
 		Args:   os.Args[1:],
+		Stdin:  os.Stdin,
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,
 		Wd:     wd,
@@ -52,6 +54,8 @@ func dispatch(e *Env, cmd string, rest []string) int {
 		return runSync(e, rest)
 	case "update":
 		return runUpdate(e, rest)
+	case "exec":
+		return runExec(e, rest)
 	case "status":
 		return runStatus(e, rest)
 	case "hook":
@@ -91,6 +95,7 @@ Usage:
   tau check                  evaluate and validate the active config
   tau sync [--update]        install tools and generate shell scripts
   tau update [name...]       re-resolve unpinned tools/packages to latest (all, or just those named)
+  tau exec [--] <cmd>...     run a command with the project's env/PATH applied (no shell hook)
   tau status                 show active project, sync state, and tools
   tau allow                  trust the active project (once)
   tau deny                   revoke trust for the active project

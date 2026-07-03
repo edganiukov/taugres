@@ -2,6 +2,11 @@
 // a Taugres config and consumed by the shell renderers.
 package model
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+)
+
 // SourceFunc describes a single shell function. Its body comes from either a
 // file (File, sourced at call time) or an inline string (Content, embedded in
 // the generated function). Exactly one of File/Content is set. A given function
@@ -41,17 +46,31 @@ type Package struct {
 }
 
 // Probe records one host-state observation made during evaluation
-// (exists(path) or which(name)) and the result at that time. Sync persists
-// these so the shell hook / staleness checks can notice when the observed state
-// changes and trigger a resync.
+// (exists(path), which(name), or env(name)) and the result at that time. Sync
+// persists these so the shell hook / staleness checks can notice when the
+// observed state changes and trigger a resync.
 //
-// Kind is "exists" or "which". Arg is the resolved absolute path (exists) or the
-// binary name (which). Result is "1"/"0" for exists, or the resolved path (or
-// "" when not found) for which.
+// Kind is "exists", "which", or "env". Arg is the resolved absolute path
+// (exists), the binary name (which), or the variable name (env). Result is
+// "1"/"0" for exists, the resolved path (or "" when not found) for which, and
+// EnvProbeResult (a value hash, or "" when unset) for env.
 type Probe struct {
 	Kind   string `json:"kind"`
 	Arg    string `json:"arg"`
 	Result string `json:"result"`
+}
+
+// EnvProbeResult encodes an env(name) observation for the manifest: "" when the
+// variable is unset, otherwise a sha256 hash of its value. Hashing keeps secrets
+// out of the on-disk manifest and ensures the recorded result never contains the
+// '|' the manifest's probe line uses as a separator. A set-but-empty value
+// hashes to a non-empty digest, so it stays distinct from unset.
+func EnvProbeResult(value string, present bool) string {
+	if !present {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 // Plan is the fully normalized, resolved environment plan. All paths are

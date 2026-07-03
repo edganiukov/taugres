@@ -3,9 +3,12 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -408,6 +411,12 @@ func buildManifest(res *config.Result, toolDirs []string, toolSig map[string]str
 		}
 	}
 	for _, f := range sourceFiles(plan) {
+		if err := add(f); err != nil {
+			return nil, err
+		}
+	}
+	// shell.dotenv(...) files are config inputs too: editing one changes the env.
+	for _, f := range res.DotenvFiles {
 		if err := add(f); err != nil {
 			return nil, err
 		}
@@ -1024,6 +1033,165 @@ func orNone(s string) string {
 		return "(none)"
 	}
 	return s
+}
+
+// --- exec ---
+
+// runExec runs a command with the project's environment applied — env vars and a
+// PATH that includes the provisioned tool bin dirs — without going through a
+// shell hook. It is the shell-agnostic slice of an activation, for editors, CI,
+// Makefiles, and one-off invocations; shell-only features (aliases, functions,
+// shell.hook) are deliberately not applied.
+//
+// It is trust-gated like activation: env vars from an untrusted config could
+// subvert the command (PATH, LD_PRELOAD, …), so an untrusted project is refused.
+// It auto-syncs when stale so freshly-declared tools are present, then execs the
+// command, propagating its exit code.
+func runExec(e *Env, args []string) int {
+	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
+	fs.SetOutput(e.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) > 0 && rest[0] == "--" {
+		rest = rest[1:]
+	}
+	if len(rest) == 0 {
+		return fail(e, "usage: tau exec [--] <command> [args...]")
+	}
+
+	d, err := discover.Discover(e.Wd)
+	if err != nil {
+		return fail(e, "%v", err)
+	}
+
+	allowed, err := trust.IsAllowed(d.ConfigPath)
+	if err != nil {
+		return fail(e, "checking trust: %v", err)
+	}
+	if !allowed {
+		return fail(e, "project is not trusted; run `tau allow`")
+	}
+
+	// Bring tools/scripts up to date so PATH reflects freshly-provisioned tool
+	// bin dirs. Installs are best-effort (like the hook's auto-sync), so ignore
+	// the result and run the command with whatever env was generated; sync output
+	// goes to stderr to keep our stdout for the command.
+	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
+	if need, nerr := state.NeedsSync(stateDir, d.ConfigPath); nerr == nil && need {
+		runSync(&Env{Stdout: e.Stderr, Stderr: e.Stderr, Wd: e.Wd}, []string{"--if-stale"})
+	}
+
+	res, err := config.Evaluate(d)
+	if err != nil {
+		return fail(e, "evaluating %s:\n%v", d.ConfigPath, err)
+	}
+	plan := res.Plan
+
+	// Recover the mise store bin dirs from the manifest (resolved at sync); the
+	// pip/uv/npm bin dirs are already deterministic in plan.PathPrepend.
+	var miseBinDirs []string
+	if m, lerr := state.Load(stateDir); lerr == nil {
+		miseBinDirs = miseBinDirsFrom(m.ToolDirs, plan)
+	}
+
+	env := projectEnviron(plan, miseBinDirs)
+	bin, err := lookPathIn(rest[0], env)
+	if err != nil {
+		return fail(e, "%v", err)
+	}
+
+	cmd := exec.Command(bin, rest[1:]...)
+	cmd.Env = env
+	cmd.Dir = e.Wd
+	cmd.Stdin = e.Stdin
+	cmd.Stdout = e.Stdout
+	cmd.Stderr = e.Stderr
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode()
+		}
+		return fail(e, "exec %s: %v", rest[0], err)
+	}
+	return 0
+}
+
+// projectEnviron builds the process environment for `tau exec`: the ambient
+// environment with the plan's env set/unset applied, the Taugres built-in
+// variables, and PATH prefixed by the tool bin dirs plus shell.path.prepend
+// entries (appends going after). It mirrors what an activation exports, minus
+// shell-only features. mise store bin dirs (known only after sync) are passed in.
+func projectEnviron(plan *model.Plan, miseBinDirs []string) []string {
+	env := map[string]string{}
+	for _, kv := range os.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+	maps.Copy(env, plan.EnvSet)
+	for _, k := range plan.EnvUnset {
+		delete(env, k)
+	}
+	env["TAUGRES_ACTIVE"] = "1"
+	env["TAUGRES_ROOT"] = plan.RepoRoot
+	env["TAUGRES_REPO_ROOT"] = plan.RepoRoot
+	env["TAUGRES_PROJECT_ROOT"] = plan.ProjectRoot
+	env["TAUGRES_CONFIG"] = plan.ConfigPath
+	env["TAUGRES_LOCK"] = filepath.Join(plan.ProjectRoot, ".taugres.lock")
+	env["TAUGRES_STATE"] = plan.StateDir
+
+	sep := string(os.PathListSeparator)
+	path := env["PATH"]
+	for _, dir := range plan.PathAppend {
+		if path == "" {
+			path = dir
+		} else {
+			path = path + sep + dir
+		}
+	}
+	prepend := dedupStrings(append(append([]string{}, miseBinDirs...), plan.PathPrepend...))
+	for i := len(prepend) - 1; i >= 0; i-- {
+		if path == "" {
+			path = prepend[i]
+		} else {
+			path = prepend[i] + sep + path
+		}
+	}
+	env["PATH"] = path
+
+	out := make([]string, 0, len(env))
+	for k, v := range env {
+		out = append(out, k+"="+v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// lookPathIn resolves cmd against the PATH carried in env (not the parent
+// process's PATH), so `tau exec` finds tools from the project environment. A cmd
+// containing a path separator is returned as-is.
+func lookPathIn(cmd string, env []string) (string, error) {
+	if strings.ContainsRune(cmd, os.PathSeparator) {
+		return cmd, nil
+	}
+	var path string
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+		}
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, cmd)
+		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("exec: %q not found in the project PATH", cmd)
 }
 
 // --- status ---

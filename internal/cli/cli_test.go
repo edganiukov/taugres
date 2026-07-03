@@ -104,6 +104,51 @@ func TestFullSyncFlow(t *testing.T) {
 	}
 }
 
+func TestExecAppliesEnvAndPath(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteExec(t, dir, "bin/taugreet", "#!/bin/sh\necho \"greet:$TAU_EXEC_VAR\"\n")
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+shell.env("TAU_EXEC_VAR", "hello")
+shell.path.prepend("//bin")
+`)
+	// Untrusted: refused before running anything.
+	if code, _, errOut := run(t, dir, "exec", "taugreet"); code == 0 || !strings.Contains(errOut, "trust") {
+		t.Fatalf("exec should require trust, code=%d err=%s", code, errOut)
+	}
+
+	run(t, dir, "allow")
+	// The project's bin/ is on PATH (found via prepend) and env vars are applied.
+	code, out, errOut := run(t, dir, "exec", "--", "taugreet")
+	if code != 0 {
+		t.Fatalf("exec failed: %s", errOut)
+	}
+	if !strings.Contains(out, "greet:hello") {
+		t.Errorf("exec stdout = %q, want it to contain greet:hello", out)
+	}
+}
+
+func TestExecPropagatesExitCode(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `project("x")`)
+	run(t, dir, "allow")
+	if code, _, _ := run(t, dir, "exec", "sh", "-c", "exit 7"); code != 7 {
+		t.Errorf("exec exit code = %d, want 7", code)
+	}
+}
+
+func TestExecNoCommand(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `project("x")`)
+	run(t, dir, "allow")
+	if code, _, errOut := run(t, dir, "exec"); code == 0 || !strings.Contains(errOut, "usage") {
+		t.Errorf("exec with no command should print usage, code=%d err=%s", code, errOut)
+	}
+}
+
 func TestManualSyncPrintsDoneLine(t *testing.T) {
 	isolate(t)
 	dir := testutil.TempWorkspace(t)

@@ -30,7 +30,7 @@ const GenDirName = "gen"
 //
 //	input:<sha256>:<abs-path>     a config input (config file, loaded module, fn/hook source file)
 //	tooldir:<abs-path>            a tool bin dir that must exist
-//	probe:<kind>|<arg>|<result>   an exists()/which() observation
+//	probe:<kind>|<arg>|<result>   an exists()/which()/env() observation
 //	toolsig:<mgr>:<sha256>        per-manager fingerprint of its tools + locked versions
 const ManifestName = "manifest"
 
@@ -46,7 +46,7 @@ type Manifest struct {
 	// a shell-only resync recovers the mise subset from here (the package dirs are
 	// derivable from the plan), so no dir is recorded twice.
 	ToolDirs []string
-	// Probes are recorded exists()/which() results; a changed result is stale.
+	// Probes are recorded exists()/which()/env() results; a changed result is stale.
 	Probes []model.Probe
 	// ToolSig maps each tool manager (mise/pip/npm/uv) to a fingerprint of its
 	// declared tools/packages joined with their locked versions. When a manager's
@@ -194,10 +194,18 @@ func SyncFingerprint(stateDir, configPath string, shells []string) string {
 			present = "0"
 		}
 		for _, p := range m.Probes {
-			bits.WriteString(boolResult(probeNow(p.Kind, p.Arg)))
+			bits.WriteString(currentProbeResult(p.Kind, p.Arg))
+			bits.WriteByte(0)
 		}
 	}
-	return strconv.FormatInt(newest, 10) + "." + present + bits.String()
+	// Hash the probe observations: they can hold PATHs or env-value hashes, so a
+	// raw join could contain the '|' that separates fields in the session token.
+	probeSig := ""
+	if bits.Len() > 0 {
+		sum := sha256.Sum256([]byte(bits.String()))
+		probeSig = hex.EncodeToString(sum[:])
+	}
+	return strconv.FormatInt(newest, 10) + "." + present + probeSig
 }
 
 // HashFile returns the hex sha256 of a file's contents.
@@ -245,35 +253,32 @@ func boolResult(ok bool) string {
 	return "0"
 }
 
-// probeNow returns a probe's current boolean observation.
-func probeNow(kind, arg string) bool {
+// currentProbeResult returns a probe's current observation in the same recorded
+// form config uses (see model.Probe / model.EnvProbeResult), so a plain string
+// comparison detects drift for every kind.
+func currentProbeResult(kind, arg string) string {
 	switch kind {
 	case "exists":
 		_, err := os.Stat(arg)
-		return err == nil
-	case "which":
-		_, err := exec.LookPath(arg)
-		return err == nil
-	}
-	return false
-}
-
-// probeDrifted reports whether a recorded probe's result differs from the
-// current world (a probed path appeared/vanished, or a binary was
-// installed/removed/moved).
-func probeDrifted(kind, arg, recorded string) bool {
-	switch kind {
-	case "exists":
-		_, err := os.Stat(arg)
-		return boolResult(err == nil) != recorded
+		return boolResult(err == nil)
 	case "which":
 		path, err := exec.LookPath(arg)
 		if err != nil {
-			path = ""
+			return ""
 		}
-		return path != recorded
+		return path
+	case "env":
+		val, ok := os.LookupEnv(arg)
+		return model.EnvProbeResult(val, ok)
 	}
-	return false
+	return ""
+}
+
+// probeDrifted reports whether a recorded probe's result differs from the
+// current world (a probed path appeared/vanished, a binary was
+// installed/removed/moved, or an env var changed).
+func probeDrifted(kind, arg, recorded string) bool {
+	return currentProbeResult(kind, arg) != recorded
 }
 
 // probesChanged reports whether any recorded probe has drifted.
@@ -290,7 +295,7 @@ func probesChanged(probes []model.Probe) bool {
 // check so the two never disagree: sync is needed when there is no completed
 // sync (manifest absent) or any staleness dimension reports drift — a config
 // input newer than the manifest, a removed tool directory, or a changed
-// exists()/which() probe. The dimensions run concurrently. The manifest is
+// exists()/which()/env() probe. The dimensions run concurrently. The manifest is
 // written only at the end of a successful sync, so a failed/partial sync never
 // suppresses a retry.
 func NeedsSync(stateDir, configPath string) (bool, error) {
@@ -357,9 +362,10 @@ func CheckStale(stateDir string, expectedShells []string) StaleReason {
 		return StaleReason{Stale: true, Reason: "tool directory " + d + " is missing; run `tau sync`"}
 	}
 
-	// exists()/which() probes: a probed file/binary changed state since sync.
+	// exists()/which()/env() probes: a probed file, binary, or env var changed
+	// state since sync.
 	if probesChanged(m.Probes) {
-		return StaleReason{Stale: true, Reason: "a probed file or binary (exists/which) changed; run `tau sync`"}
+		return StaleReason{Stale: true, Reason: "a probed file, binary, or env var (exists/which/env) changed; run `tau sync`"}
 	}
 
 	return StaleReason{Stale: false}

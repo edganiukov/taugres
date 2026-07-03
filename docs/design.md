@@ -1,7 +1,9 @@
 # Taugres Design
 
-This document describes the design of Taugres as built. `taugres`/Taugres is a
-working project name; the CLI binary is `tau`.
+This document describes the design of Taugres as built — the *why* behind it.
+For the config/syntax/CLI **reference** (the Starlark API, path rules, built-in
+variables, and commands), see [reference.md](reference.md). `taugres`/Taugres is
+a working project name; the CLI binary is `tau`.
 
 ## What it is
 
@@ -105,15 +107,9 @@ project/
 **Trust records live outside the repo** (see Trust), so a checkout never carries
 its own approval.
 
-Config file names are fixed; Taugres does not discover arbitrary `.tg` files as
-entrypoints:
-
-- `workspace.tg` — repository-root marker and shared root config;
-- `project.tg` — nested/secondary project config;
-- `*.tg` elsewhere (e.g. `taugres/lib/`) — helper modules, only reachable via
-  `load(...)`.
-
-A directory must not contain both `workspace.tg` and `project.tg`.
+Config file names are fixed (`workspace.tg`, `project.tg`, and `load(...)`-only
+helper modules); a directory must not contain both `workspace.tg` and
+`project.tg`. See [reference.md](reference.md#config-files) for the rules.
 
 ## Core model
 
@@ -136,140 +132,29 @@ next prompt without a manual step (see Shell hook).
 
 Starlark gives real functions, conditionals, deterministic evaluation, and
 `load(...)` imports. The API is side-effect style: calls mutate an in-memory
-plan, never the host. Host access is limited to two read-only probes for
-conditional config — `exists(path)` and `which(name)` — which can read the
-filesystem/PATH but never run commands or write anything.
+plan, never the host. Host access is limited to read-only probes for conditional
+config — `exists(path)`, `which(name)`, and `env(name)` — which can read the
+filesystem/PATH/environment but never run commands or write anything.
+`shell.dotenv(path)` likewise only *reads* a `.env` file into the plan's
+environment.
 
 All shell-facing configuration is grouped under the `shell` namespace; external
-tool managers keep their own namespaces.
+tool managers keep their own namespaces. The full API surface, path-anchoring
+rules, reusable-helper pattern, and the built-in `TAUGRES_*` variables live in
+[reference.md](reference.md#configuration-api).
 
-```python
-project("my-app")
-
-# Environment. Values expand $VAR / ${VAR} against earlier shell.env entries
-# and the process environment.
-shell.env("DATABASE_URL", "postgres://localhost/app")
-shell.env("BIN", "$HOME/.local/bin")
-shell.unset("PYTHONPATH")
-
-# PATH — repository-root anchored with //.
-shell.path.prepend("//node_modules/.bin")
-shell.path.append("//scripts")
-
-# Aliases.
-shell.alias("ll", "ls -lah")
-
-# Shell functions (mutate the caller shell): inline content or a file body.
-shell.fn("croot", shells = ["bash", "zsh"], content = "cd $TAUGRES_PROJECT_ROOT")
-shell.fn("croot", shells = ["fish"], file = "//bin/croot.fish")
-
-# Raw activation setup, like flake.nix's shellHook.
-shell.hook(shells = ["bash", "zsh"], content = "mkdir -p .cache")
-
-# Tools/packages (see Package management). Single or an array of specs.
-mise.tool(["go@1.26.2", "python"])
-pip.install(["ruff@0.6.9", "rich"])
-npm.install("typescript")
-
-# Platform conditionals.
-if platform.os == "linux":
-    shell.env("TAUGRES_PLATFORM", "linux")
-```
-
-### API summary
-
-```python
-project(name)
-
-shell.env(name, value)          # value expands $VAR/${VAR} (earlier env, then process env)
-shell.unset(name)
-shell.alias(name, value)
-shell.path.prepend(entry)       # //-anchored or absolute
-shell.path.append(entry)
-shell.fn(name, shells=[...], content=... | file=...)   # exactly one of content/file
-shell.hook(shells=[...], content=... | file=...)       # raw activation snippet
-
-# Tools/packages: a "name@version" spec (bare name = latest) or a list of them.
-# "@" is the uniform pin separator (translated to pip's "==" internally); the
-# last "@" wins so npm scoped names stay intact.
-mise.tool("go@1.26.2")   | mise.tool(["go@1.26.2", "python"])
-pip.install("ruff@0.6.9") | pip.install(["ruff@0.6.9", "rich"])   # Python via pip
-uv.install("ruff@0.6.9")  | uv.install(["ruff@0.6.9", "rich"])    # Python via uv (faster)
-npm.install("typescript") | npm.install(["typescript@5.6.2", "@scope/x@1"])
-
-platform.os                     # "linux" | "macos"
-platform.arch                   # "x86_64" | "aarch64" | ...
-
-exists("//go.mod")              # bool: root-anchored/absolute path on disk?
-which("docker")                 # abs path of a PATH binary, or None
-
-load("//taugres/lib/x.tg", "sym")   # root-anchored
-load("./lib/x.tg", "sym")           # relative to the importing file
-```
-
-There is intentionally **no `bin()` builtin and no automatic `bin/`**: expose
-project commands explicitly with `shell.path.prepend("//bin")`. This keeps PATH
-composition predictable and the model uniform.
-
+Two decisions worth calling out here. There is intentionally **no `bin()`
+builtin and no automatic `bin/`**: project commands are exposed explicitly with
+`shell.path.prepend("//bin")`, keeping PATH composition predictable. And
 `shell.hook` bodies run at activation *after* env/PATH/aliases/functions, in
 declaration order, inside the trust gate; they are not undone on deactivation
-(fire-and-forget, like a function body). They are the escape hatch for
-imperative setup.
+(fire-and-forget, like a function body) — the escape hatch for imperative setup.
 
-### Root-anchored paths and imports
-
-Config must not depend on the process cwd. Path arguments
-(`shell.path.*`, `shell.fn`/`shell.hook` `file=`) are anchored:
-
-- `//foo/bar` → `<repo-root>/foo/bar`;
-- absolute paths are allowed;
-- bare/relative paths (`foo`, `./foo`, `../foo`) are rejected.
-
-`load(...)` is more flexible: besides root-anchored `//…` it also accepts
-**relative** imports (`./x.tg`, `../x.tg`) resolved against the importing file's
-directory. Remote (`https://`) imports are **not supported yet** and produce a
-clear error.
-
-Discovery:
-
-1. walk upward from cwd to the first `project.tg`/`workspace.tg` — the active
-   config;
-2. from there, walk upward to the first `workspace.tg` — the repository root;
-3. if none, the active project root is also the repo root.
-
-For nested projects, `//` is the repository root while `TAUGRES_PROJECT_ROOT` is
-the active project directory.
-
-### Reusable helpers
-
-```python
-# taugres/lib/node.tg
-def node_project():
-    shell.env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
-    shell.path.prepend("//node_modules/.bin")
-    shell.alias("pn", "pnpm")
-```
-
-```python
-# workspace.tg
-load("//taugres/lib/node.tg", "node_project")   # or "./taugres/lib/node.tg"
-project("my-node-app")
-node_project()
-```
-
-### Built-in environment variables
-
-Activation sets:
-
-```sh
-TAUGRES_ACTIVE=1
-TAUGRES_ROOT=/repo                    # repository root; anchor for //
-TAUGRES_REPO_ROOT=/repo               # alias for TAUGRES_ROOT
-TAUGRES_PROJECT_ROOT=/repo/service-a  # active project root
-TAUGRES_CONFIG=/repo/service-a/project.tg
-TAUGRES_LOCK=/repo/service-a/.taugres.lock
-TAUGRES_STATE=/repo/service-a/.taugres
-```
+Config must not depend on the process cwd, so path arguments are root-anchored
+(`//…`) or absolute and bare/relative paths are rejected; `load(...)` also
+accepts relative imports against the importing file. Remote (`https://`) imports
+are not supported yet (see [reference.md](reference.md#path-anchoring-and-imports)
+and Deferred).
 
 ## Activation / deactivation
 
@@ -284,15 +169,28 @@ then activates the new one. A mid-session config change re-syncs and re-activate
 in place (deactivating with the *old* script before regenerating so removed
 vars/PATH don't leak).
 
+### Non-interactive activation (`tau exec`)
+
+`tau exec [--] <cmd> [args...]` runs a command with the project's environment
+applied — env vars (including `shell.dotenv`) and a `PATH` that includes the
+provisioned tool bin dirs — **without** a shell hook. It is the shell-agnostic
+slice of an activation, for editors, CI, `Makefile`s, and one-off invocations.
+Shell-only features (aliases, functions, `shell.hook`) are deliberately *not*
+applied: they mutate a live shell, not a spawned process.
+
+It builds the child environment directly from the plan rather than parsing the
+generated shell scripts: the ambient environment with the plan's env set/unset
+applied, the `TAUGRES_*` built-ins, and `PATH` prefixed by the tool bin dirs
+(mise store dirs recovered from the manifest, package dirs from the plan). It is
+**trust-gated** like activation — env vars from an untrusted config could subvert
+the command (`PATH`, `LD_PRELOAD`, …) — and it **auto-syncs when stale** (best
+effort, like the hook) so freshly-declared tools are present, then execs the
+command and propagates its exit code.
+
 ## Shell hook
 
-Install once per shell:
-
-```sh
-eval "$(tau hook zsh)"     # ~/.zshrc
-eval "$(tau hook bash)"    # ~/.bashrc  (double quotes required)
-tau hook fish | source     # ~/.config/fish/config.fish
-```
+Install once per shell (see [reference.md](reference.md#installing-the-shell-hook)
+for the exact snippets).
 
 Wiring: zsh uses `chpwd`+`precmd`; fish uses the `fish_prompt` event; bash has
 no native prompt hook, so the snippet installs itself into `PROMPT_COMMAND`,
@@ -330,9 +228,9 @@ Staleness is a set of independent dimensions, all recorded in one file —
 "last synced" anchor):
 
 ```
-input:<sha256>:<abs-path>     a config input (config file, load(...) module, shell.fn/shell.hook file)
+input:<sha256>:<abs-path>     a config input (config file, load(...) module, shell.fn/shell.hook/shell.dotenv file)
 tooldir:<abs-path>            a tool bin dir that must exist
-probe:<kind>|<arg>|<result>   an exists()/which() observation
+probe:<kind>|<arg>|<result>   an exists()/which()/env() observation
 toolsig:<mgr>:<sha256>        per-manager fingerprint of its tools + locked versions
 ```
 
@@ -340,11 +238,19 @@ toolsig:<mgr>:<sha256>        per-manager fingerprint of its tools + locked vers
 | --- | --- |
 | input | a config input's mtime is newer than the manifest (`NeedsSync`) or its content hash changed (`tau status`) |
 | tooldir | a recorded tool bin dir (mise store, pip/uv venv, npm prefix) is missing |
-| probe | an `exists()`/`which()` result changed (a probed file appeared/vanished, a binary was installed/removed) |
+| probe | an `exists()`/`which()`/`env()` result changed (a probed file appeared/vanished, a binary was installed/removed, an env var changed) |
 
 The first three are the **env-trigger** dimensions (`state.NeedsSync`, run
 concurrently) that decide *whether* to sync. The `toolsig` lines drive *what
 work* a sync does — see Per-manager staleness.
+
+An `env()` probe records a **hash** of the observed value (not the value), so
+secrets never land in the on-disk manifest and a value containing `|` can't
+break the probe line. A set-but-empty value stays distinct from unset. `env()`
+observations come from the environment `tau` runs in — the shell's environment at
+that prompt — so changing a probed variable re-syncs on the next prompt. Probing
+a variable tau itself mutates (e.g. `PATH`) would resync every activation and is
+a footgun to avoid.
 
 **Retry guard.** A failed auto-sync must not be re-run on every prompt (it
 would re-evaluate Starlark and re-print its error). After a failed attempt,
@@ -550,26 +456,6 @@ paths), consumed by the renderers:
 mise tool bin dirs are added to PATH at sync time (their versioned store paths
 aren't known at eval), so they don't appear in the eval-time `pathPrepend`.
 
-## Commands
-
-```sh
-tau init [--nested]        # create workspace.tg (or project.tg)
-tau check                  # evaluate + validate config
-tau sync [--update]        # install tools/packages and generate scripts (needs trust)
-tau sync --verbose         # print every step and tool output
-tau update [name...]       # re-resolve unpinned tools/packages to latest (all, or just those named)
-tau status                 # active project, sync state, tools, trust
-tau allow                  # trust the active project (once)
-tau deny                   # revoke trust
-tau clean [--lock]         # remove .taugres/; --lock also drops .taugres.lock
-tau prune                  # remove orphaned trust records
-tau hook <shell>           # print the shell hook (bash|zsh|fish)
-tau hook-env <shell>       # used by the hook: env/activation commands for this prompt
-tau activate [shell]       # print the activation script for a trusted project (default: $SHELL)
-tau deactivate [shell]     # print the deactivation script for a trusted project (default: $SHELL)
-tau version
-```
-
 ## Future, explicitly deferred
 
 - **Frozen ecosystem-dependency installs** (`npm ci`, `uv sync --frozen`, …) and
@@ -578,6 +464,16 @@ tau version
 - **Remote (`https://`) Starlark imports**, with content pinned by sha256 in the
   lock (portable, tamper-evident) and cache-first fetching.
 - **`tau doctor`** — host requirement checks (mise/python/node presence).
+- **`tau env [--json]`** — dump the resolved environment (env vars + `PATH`) for
+  editor/IDE integration, CI, and debugging. Shares the plan→environ computation
+  that backs `tau exec`.
+- **`tau why <VAR>`** — trace an env var or `PATH` entry back to the config line
+  (or `load(...)`ed helper / `shell.dotenv` file) that produced it. Builds on the
+  normalized `Plan`.
+- **Auto-adopt existing version files** — read `.tool-versions` / `.nvmrc` /
+  `.python-version` and feed them to `mise.tool`, as an explicit opt-in builtin
+  (e.g. `mise.tool_versions("//.tool-versions")`) rather than implicit discovery,
+  with the file tracked as a config input for staleness.
 - **Golden tests** for generated scripts.
 - A strict mode (record mise/manager versions, require managers via mise).
 - **Opt-in nested inheritance** with explicit conflict rules.

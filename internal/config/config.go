@@ -32,7 +32,8 @@ const defaultMiseJobs = 16
 type Result struct {
 	Plan          *model.Plan
 	LoadedModules []string      // absolute paths of loaded .tg modules
-	Probes        []model.Probe // exists()/which() observations, for stale detection
+	DotenvFiles   []string      // absolute paths of shell.dotenv(...) files (config inputs)
+	Probes        []model.Probe // exists()/which()/env() observations, for stale detection
 }
 
 // Evaluate evaluates the active config file into a normalized plan. Imports may
@@ -58,7 +59,7 @@ func Evaluate(d *discover.Discovery) (*Result, error) {
 		return nil, err
 	}
 
-	return &Result{Plan: plan, LoadedModules: b.loadedList(), Probes: b.probes}, nil
+	return &Result{Plan: plan, LoadedModules: b.loadedList(), DotenvFiles: b.dotenvFiles, Probes: b.probes}, nil
 }
 
 type loadEntry struct {
@@ -90,7 +91,12 @@ type builder struct {
 	loaded      map[string]bool
 	loadCache   map[string]*loadEntry
 
-	// probes records exists()/which() observations for stale detection.
+	// dotenvFiles records shell.dotenv(...) file paths (deduped) so sync can hash
+	// them as config inputs and re-sync when they change.
+	dotenvFiles []string
+	dotenvSeen  map[string]bool
+
+	// probes records exists()/which()/env() observations for stale detection.
 	probes    []model.Probe
 	probeSeen map[string]bool
 }
@@ -103,6 +109,7 @@ func newBuilder(d *discover.Discovery) *builder {
 		sourceFuncs: map[string][]model.SourceFunc{},
 		loaded:      map[string]bool{},
 		loadCache:   map[string]*loadEntry{},
+		dotenvSeen:  map[string]bool{},
 		probeSeen:   map[string]bool{},
 		miseJobs:    defaultMiseJobs,
 	}
@@ -125,12 +132,13 @@ func (b *builder) predeclared() starlark.StringDict {
 		"append":  b.builtin("shell.path.append", b.pathAppendFn),
 	})
 	shellModule := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
-		"env":   b.builtin("shell.env", b.envFn),
-		"unset": b.builtin("shell.unset", b.unsetFn),
-		"alias": b.builtin("shell.alias", b.aliasFn),
-		"path":  shellPath,
-		"fn":    b.builtin("shell.fn", b.fnSourceFn),
-		"hook":  b.builtin("shell.hook", b.hookFn),
+		"env":    b.builtin("shell.env", b.envFn),
+		"unset":  b.builtin("shell.unset", b.unsetFn),
+		"alias":  b.builtin("shell.alias", b.aliasFn),
+		"path":   shellPath,
+		"fn":     b.builtin("shell.fn", b.fnSourceFn),
+		"hook":   b.builtin("shell.hook", b.hookFn),
+		"dotenv": b.builtin("shell.dotenv", b.dotenvFn),
 	})
 
 	miseModule := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
@@ -159,6 +167,7 @@ func (b *builder) predeclared() starlark.StringDict {
 		"project":  b.builtin("project", b.projectFn),
 		"exists":   b.builtin("exists", b.existsFn),
 		"which":    b.builtin("which", b.whichFn),
+		"env":      b.builtin("env", b.envProbeFn),
 		"shell":    shellModule,
 		"mise":     miseModule,
 		"pip":      pipModule,
@@ -222,6 +231,63 @@ func (b *builder) whichFn(_ *starlark.Thread, fn *starlark.Builtin, args starlar
 	}
 	b.recordProbe("which", name, path)
 	return starlark.String(path), nil
+}
+
+// envProbeFn implements env(name, default=""): read a process environment
+// variable for conditional config, returning its value, or default when the
+// variable is unset. Composes as a truthy check (`if env("CI"): …`) since an
+// unset/empty value is falsy.
+//
+// Like exists()/which() it is a read-only probe recorded for stale detection, so
+// changing the observed variable re-syncs on the next prompt. The recorded value
+// is hashed (see model.EnvProbeResult), so secrets never land in the manifest.
+// Beware probing a variable tau itself mutates (e.g. PATH): it would flip on
+// every activation and re-sync in a loop.
+func (b *builder) envProbeFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name, def string
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "name", &name, "default?", &def); err != nil {
+		return nil, err
+	}
+	val, ok := os.LookupEnv(name)
+	b.recordProbe("env", name, model.EnvProbeResult(val, ok))
+	if !ok {
+		return starlark.String(def), nil
+	}
+	return starlark.String(val), nil
+}
+
+// dotenvFn implements shell.dotenv(path): load KEY=VALUE pairs from a .env file
+// into the environment, as if each were a shell.env(...). The path is
+// root-anchored (//…) or absolute. Values are taken literally (no $VAR
+// expansion), so secrets containing $ round-trip unchanged; wrap a value in
+// single or double quotes to include surrounding spaces. The file is a config
+// input — editing it triggers a resync — and it must exist (a missing file is an
+// error, surfaced at evaluation).
+func (b *builder) dotenvFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var path string
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "path", &path); err != nil {
+		return nil, err
+	}
+	resolved, err := b.resolvePath(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", fn.Name(), err)
+	}
+	pairs, err := parseDotenv(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: %w", fn.Name(), resolved, err)
+	}
+	for _, kv := range pairs {
+		b.envSet[kv.key] = kv.value
+	}
+	if !b.dotenvSeen[resolved] {
+		b.dotenvSeen[resolved] = true
+		b.dotenvFiles = append(b.dotenvFiles, resolved)
+	}
+	return starlark.None, nil
 }
 
 // recordProbe remembers a host-state observation (deduped by kind+arg) so sync
@@ -594,6 +660,65 @@ func splitSpec(s string) (name, version string) {
 		return s[:i], s[i+1:]
 	}
 	return s, ""
+}
+
+// dotenvPair is one parsed KEY=VALUE entry from a .env file.
+type dotenvPair struct{ key, value string }
+
+// parseDotenv parses a minimal .env format: KEY=VALUE lines with an optional
+// `export ` prefix, `#` comment lines, and blank lines. A value may be wrapped
+// in single quotes (literal) or double quotes (with \n \t \r \\ \" escapes); an
+// unquoted value is taken verbatim after trimming surrounding whitespace.
+func parseDotenv(data []byte) ([]dotenvPair, error) {
+	var out []dotenvPair
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(line, "export "); ok {
+			line = strings.TrimSpace(rest)
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("line %d: expected KEY=VALUE, got %q", i+1, raw)
+		}
+		key = strings.TrimSpace(key)
+		if !validEnvName(key) {
+			return nil, fmt.Errorf("line %d: invalid variable name %q", i+1, key)
+		}
+		out = append(out, dotenvPair{key, dotenvValue(strings.TrimSpace(val))})
+	}
+	return out, nil
+}
+
+// dotenvValue unwraps a .env value: single quotes are literal, double quotes
+// honor a small set of escapes, and an unquoted value passes through.
+func dotenvValue(s string) string {
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		return s[1 : len(s)-1]
+	}
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return strings.NewReplacer(`\n`, "\n", `\t`, "\t", `\r`, "\r", `\"`, `"`, `\\`, `\`).Replace(s[1 : len(s)-1])
+	}
+	return s
+}
+
+// validEnvName reports whether s is a POSIX-ish environment variable name
+// (leading letter/underscore, then letters/digits/underscores).
+func validEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // hasMiseTool reports whether tools already declares a tool with the given name.
