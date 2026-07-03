@@ -57,22 +57,27 @@ function _tau_deactivate
     test -f "$d"; and source "$d"
 end
 
+# _tau_teardown deactivates the currently-active project, if any, and forgets it.
+function _tau_teardown
+    set -q _TAU_ACTIVE_ROOT; and test -n "$_TAU_ACTIVE_ROOT"; or return 0
+    _tau_deactivate "$_TAU_ACTIVE_ROOT"
+    set -e _TAU_ACTIVE_ROOT
+end
+
 # Runs on every directory change. The common case (nothing changed) costs only a
-# few stats. It shells out to tau sync only when a config input changed or a
-# generated script / tool dir is missing, and never re-runs a failed sync for
-# the same inputs. It never evaluates Starlark or runs package managers itself.
+# few stats and no subprocess. It shells out to \x60tau sync --if-stale\x60 only when
+# the manifest shows drift (guarded by _TAU_TRIED so a failing sync is not
+# retried until inputs change), and delegates activation to \x60tau activate\x60. It
+# never evaluates Starlark or runs package managers itself.
 function _tau_hook --on-variable PWD
     set -l proj (_tau_find_config)
 
-    # Outside any project: tear down an active env and stop. Only clear the
-    # activation token when something was actually active — so returning to a
-    # project we never activated (e.g. an untrusted one) does not re-run
-    # \x60tau activate\x60 and re-print its "not trusted" notice; that notice then
-    # shows once per shell, not on every cd back in.
+    # Outside any project: tear down and stop. Drop the activation token only when
+    # something was active, so returning to a never-activated (e.g. untrusted)
+    # project does not re-run \x60tau activate\x60 and re-print its notice every cd.
     if test -z "$proj"
         if set -q _TAU_ACTIVE_ROOT; and test -n "$_TAU_ACTIVE_ROOT"
-            _tau_deactivate "$_TAU_ACTIVE_ROOT"
-            set -e _TAU_ACTIVE_ROOT
+            _tau_teardown
             set -e _TAU_ACT_TOKEN
         end
         return 0
@@ -150,48 +155,33 @@ function _tau_hook --on-variable PWD
         set -l _tau_tok "$proj|$present|$newest|$probesig"
         if test "$_tau_tok" != "$_TAU_TRIED"
             set -g _TAU_TRIED "$_tau_tok"
-            # Tear down this project's active env with the matching deactivate
-            # before regenerating, so removed vars/PATH do not leak.
-            if test "$_TAU_ACTIVE_ROOT" = "$proj"
-                _tau_deactivate "$proj"
-                set -e _TAU_ACTIVE_ROOT
-            end
+            # If this project is active, tear it down with the CURRENT deactivate
+            # script before the sync regenerates it, so removed vars/PATH don't leak.
+            test "$_TAU_ACTIVE_ROOT" = "$proj"; and _tau_teardown
             set -l _tau_pre (_tau_mtime "$activate")
             if pushd "$proj" 2>/dev/null
                 $_TAU_BIN sync --if-stale
                 popd
             end
-            # The sync may have regenerated the env; force the (re)activation
-            # below rather than trust activate's mtime, whose 1s granularity can
-            # miss a same-second resync.
-            set -e _TAU_ACT_TOKEN
-            # Clear the retry guard only if the sync actually (re)generated the
-            # env — the activate mtime changed — so a later teardown (rm -rf
-            # .taugres) syncs again. A no-op sync (e.g. an untrusted project that
-            # cannot sync, leaving a pre-existing activate script untouched) keeps
-            # the guard, so it is not retried — and re-activated — every prompt.
+            set -e _TAU_ACT_TOKEN # force (re)activation below (activate mtime is 1s-granular)
+            # Re-arm the guard only if the sync actually regenerated the env
+            # (activate mtime changed): a teardown (rm -rf .taugres) then re-syncs,
+            # but a no-op sync (e.g. an untrusted project) is not retried every prompt.
             set -l _tau_post (_tau_mtime "$activate")
             test -n "$_tau_post"; and test "$_tau_pre" != "$_tau_post"; and set -e _TAU_TRIED
         end
     end
 
-    # (Re)activate on entering/switching, or when the generated env changed.
-    # Activation is delegated to \x60tau activate\x60, which refuses to emit a script
-    # for a project not trusted on THIS machine, so a cloned repo cannot run code
-    # on cd. Trust lives outside the repo and cannot be forged by repo contents.
-    #
-    # \x60tau activate\x60 is also the single voice that explains why a project isn't
-    # active — "not trusted; run \x60tau allow\x60", or "no script; run \x60tau sync\x60" — so
-    # the auto-sync above stays quiet about trust. Guarded by _TAU_ACT_TOKEN (the
-    # activate mtime, empty when absent) so it speaks at most once per state.
+    # (Re)activate on entering/switching, or when the env changed. Delegated to
+    # \x60tau activate\x60, which refuses untrusted projects (trust lives outside the
+    # repo, so a cloned repo can't run code on cd) and is the single voice for
+    # "not trusted"/"not synced". Guarded by _TAU_ACT_TOKEN (the activate mtime)
+    # so it runs at most once per state.
     set -l stamp (_tau_mtime "$activate")
     set -l acttok "$proj|$stamp"
     if test "$acttok" != "$_TAU_ACT_TOKEN"
         set -g _TAU_ACT_TOKEN "$acttok"
-        if set -q _TAU_ACTIVE_ROOT; and test -n "$_TAU_ACTIVE_ROOT"
-            _tau_deactivate "$_TAU_ACTIVE_ROOT"
-            set -e _TAU_ACTIVE_ROOT
-        end
+        _tau_teardown
         if test -n "$_TAU_BIN"
             set -l _tau_script ($_TAU_BIN activate fish | string collect)
             if test -n "$_tau_script"
