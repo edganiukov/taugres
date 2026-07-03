@@ -62,7 +62,7 @@ func TestHookFishUsesPromptEvent(t *testing.T) {
 	for _, want := range []string{
 		"set -g _TAU_BIN '/usr/local/bin/tau'",
 		"function _tau_hook --on-event fish_prompt",
-		"hook-env fish | source",
+		`hook-env fish "$_TAU_APPLIED" | source`,
 		"_tau_find_config",
 		"TAUGRES_HOOK",
 	} {

@@ -436,6 +436,70 @@ cd "` + repo + `"; prompt` // return -> must stay silent
 	}
 }
 
+// TestHookChildShellReactivates: the TAUGRES_HOOK token is exported so tau can
+// read it, which means a nested shell inherits it — but aliases and functions do
+// not survive a fork. The shim's unexported _TAU_APPLIED flag tells hook-env the
+// claim is inherited, so the child re-activates and regains them.
+func TestHookChildShellReactivates(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	tau := builtTau(t)
+	cfgHome := t.TempDir()
+	cacheHome := t.TempDir()
+	env := append(os.Environ(), "XDG_CONFIG_HOME="+cfgHome, "XDG_CACHE_HOME="+cacheHome)
+
+	repo := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, repo, "workspace.tg",
+		"project(\"demo\")\nshell.env(\"SCOPE\", \"root\")\nshell.fn(\"hi\", shells = [\"bash\", \"zsh\"], content = \"echo hello\")\n")
+	for _, cmd := range []string{"allow", "sync"} {
+		c := exec.Command(tau, cmd)
+		c.Dir = repo
+		c.Env = env
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("tau %s: %v\n%s", cmd, err, out)
+		}
+	}
+
+	hookCmd := exec.Command(tau, "hook", "bash")
+	hookCmd.Env = env
+	hookOut, err := hookCmd.Output()
+	if err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+	hookFile := filepath.Join(t.TempDir(), "hook.sh")
+	if err := os.WriteFile(hookFile, hookOut, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Parent activates; the child bash (inheriting the exported token and env
+	// vars, but not the function) sources the hook and must re-activate.
+	script := `cd "` + repo + `"
+source "` + hookFile + `"
+prompt() { local c; for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done; }
+prompt
+type hi >/dev/null 2>&1 && echo "PARENT_FN=ok" || echo "PARENT_FN=missing"
+bash --noprofile --norc -c '
+source "` + hookFile + `"
+prompt() { local c; for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done; }
+prompt
+type hi >/dev/null 2>&1 && echo "CHILD_FN=ok" || echo "CHILD_FN=missing"
+echo "CHILD_SCOPE=${SCOPE:-unset}"'`
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", script)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash: %v\n%s", err, out)
+	}
+	got := string(out)
+	for _, want := range []string{"PARENT_FN=ok", "CHILD_FN=ok", "CHILD_SCOPE=root"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q — nested shell did not re-activate:\n%s", want, got)
+		}
+	}
+}
+
 // TestConcurrentEntryWaitsForInProgressSync reproduces the two-shells race: a
 // slow sync is running (holding the lock) when a second shell enters. The
 // second shell's hook must shell out to tau, block on the lock, and only

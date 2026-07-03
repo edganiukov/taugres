@@ -46,7 +46,10 @@ function _tau_hook --on-event fish_prompt
             return 0
         end
     end
-    $_TAU_BIN hook-env fish | source
+    # _TAU_APPLIED is set (unexported) by the sourced output when THIS shell
+    # sourced the activate script; a child shell inherits the exported token
+    # but not this flag, so hook-env re-activates there.
+    $_TAU_BIN hook-env fish "$_TAU_APPLIED" | source
 end
 
 # Run once for the current directory.

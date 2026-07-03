@@ -76,7 +76,10 @@ _tau_hook() {
     # to tear down, so spawn nothing.
     case "${TAUGRES_HOOK:-}" in ""|0\|*) return 0 ;; esac
   fi
-  eval "$("$_TAU_BIN" hook-env "$_TAU_SHELL")"
+  # _TAU_APPLIED is set (unexported) by the eval'd output when THIS shell
+  # sourced the activate script. A child shell inherits the exported token but
+  # not this flag (or the aliases/functions), so hook-env re-activates there.
+  eval "$("$_TAU_BIN" hook-env "$_TAU_SHELL" "${_TAU_APPLIED:-}")"
 }
 `
 

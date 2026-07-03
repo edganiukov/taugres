@@ -307,12 +307,16 @@ and parses nothing:
 
 `tau hook-env` owns everything in Go: staleness, the retry guard, auto-sync,
 trust, and activation/deactivation. Session state round-trips through the
-`TAUGRES_HOOK` env var, which the eval'd output itself sets — `<proj>|<activate
-mtime>`, prefixed with `-` when the state was recorded but nothing activated
-(untrusted, or no generated script). The dormant prefix keeps the "not trusted"
-notice at once per shell (re-entry compares equal and stays silent) and lets the
-shim skip tau entirely outside projects. On an unchanged state — the common case
-— hook-env prints nothing.
+`TAUGRES_HOOK` env var, which the eval'd output itself sets —
+`<applied>|<stamp>|<fp>|<proj>` (whether this shell sourced the activate script,
+the script's mtime, the failed-sync retry fingerprint, and the project root).
+hook-env computes the desired state and emits at most one transition; on an
+unchanged state — the common case — it prints nothing. The leading applied bit
+keeps the "not trusted" notice at once per shell and lets the shim skip tau
+entirely outside projects. Because the token is exported, a child shell inherits
+it — but aliases/functions don't survive a fork — so the shim also keeps an
+**unexported** `_TAU_APPLIED` flag and passes it back as an argument: an
+inherited "applied" claim reconciles to false and the nested shell re-activates.
 
 This is both simpler and faster than the previous pure-shell hook, which parsed
 the manifest with builtins on every prompt: one warm Go exec (~2–3ms) beats the

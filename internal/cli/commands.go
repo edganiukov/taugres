@@ -1202,8 +1202,14 @@ func emitGenScript(e *Env, args []string, kind string) int {
 //	fp       retry fingerprint ("" once synced; non-empty after a failed sync)
 //	proj     project root (may contain '|', so it is the trailing field)
 //
-// It is exported so `tau hook-env` (a subprocess) can read it. An empty or
-// foreign value parses as "nothing recorded" and is treated as a clean reset.
+// It is exported so `tau hook-env` (a subprocess) can read it — which means a
+// child shell inherits it, while the aliases and functions the activate script
+// defined do not survive the fork. The shim therefore keeps an UNEXPORTED
+// _TAU_APPLIED flag alongside (set by the same eval'd output) and passes it
+// back as an argument: an inherited token whose shell lacks the flag has its
+// applied claim reconciled to false, so the child re-activates. An empty or
+// foreign token value parses as "nothing recorded" and is treated as a clean
+// reset.
 type hookToken struct {
 	applied bool
 	stamp   string
@@ -1244,8 +1250,8 @@ func (t hookToken) String() string {
 // project, then activate the target), so the sourced env can never be left torn
 // down or doubly applied.
 func runHookEnv(e *Env, args []string) int {
-	if len(args) != 1 {
-		return fail(e, "usage: tau hook-env <shell> (bash|zsh|fish)")
+	if len(args) < 1 || len(args) > 2 {
+		return fail(e, "usage: tau hook-env <shell> [applied]")
 	}
 	shell := args[0]
 	if !slices.Contains(render.SupportedShells, shell) {
@@ -1253,17 +1259,36 @@ func runHookEnv(e *Env, args []string) int {
 	}
 
 	prev, _ := parseHookToken(os.Getenv("TAUGRES_HOOK"))
+	// Reconcile the token's applied claim against shell reality: the shim passes
+	// its unexported _TAU_APPLIED, which a child shell does not inherit (nor the
+	// aliases/functions), so an inherited "applied" token re-activates there.
+	// When the arg is absent (a shim from an older tau), trust the claim.
+	if len(args) == 2 {
+		prev.applied = prev.applied && args[1] == "1"
+	}
 
 	deactivateScript := func(proj string) []byte {
 		data, _ := os.ReadFile(filepath.Join(state.GenDir(filepath.Join(proj, ".taugres")), "deactivate."+shell))
 		return data
 	}
 	setToken := func(t hookToken) {
-		// Exported so the next prompt's `tau hook-env` subprocess can read it.
+		// The token is exported so the next prompt's `tau hook-env` subprocess can
+		// read it; _TAU_APPLIED is deliberately NOT exported so child shells (which
+		// inherit the token but not aliases/functions) re-activate.
 		if shell == "fish" {
 			fmt.Fprintf(e.Stdout, "set -gx TAUGRES_HOOK %s\n", shellhook.FishSingleQuote(t.String()))
+			if t.applied {
+				fmt.Fprintln(e.Stdout, "set -g _TAU_APPLIED 1")
+			} else {
+				fmt.Fprintln(e.Stdout, "set -e _TAU_APPLIED")
+			}
 		} else {
 			fmt.Fprintf(e.Stdout, "export TAUGRES_HOOK=%s\n", shellhook.SingleQuote(t.String()))
+			if t.applied {
+				fmt.Fprintln(e.Stdout, "_TAU_APPLIED=1")
+			} else {
+				fmt.Fprintln(e.Stdout, "unset _TAU_APPLIED")
+			}
 		}
 	}
 
@@ -1284,8 +1309,9 @@ func runHookEnv(e *Env, args []string) int {
 		if os.Getenv("TAUGRES_HOOK") != "" {
 			if shell == "fish" {
 				fmt.Fprintln(e.Stdout, "set -e TAUGRES_HOOK")
+				fmt.Fprintln(e.Stdout, "set -e _TAU_APPLIED")
 			} else {
-				fmt.Fprintln(e.Stdout, "unset TAUGRES_HOOK")
+				fmt.Fprintln(e.Stdout, "unset TAUGRES_HOOK _TAU_APPLIED")
 			}
 		}
 		return 0
