@@ -1139,22 +1139,22 @@ func runActivate(e *Env, args []string) int   { return emitGenScript(e, args, "a
 func runDeactivate(e *Env, args []string) int { return emitGenScript(e, args, "deactivate") }
 
 // emitGenScript prints the generated activate/deactivate script for the current
-// project to stdout, so the shell hook (or a user) can `eval` it. It runs on the
-// hot path (every project entry) and does no staleness check: the hook re-syncs
-// on change before calling it, and `tau status` reports staleness.
+// project to stdout, so a user can `eval` it. It does no staleness check: `tau
+// status` reports staleness.
 //
-// activate is trust-gated — the hook sources this stdout, so refusing an
-// untrusted project is the security boundary (trust lives outside the repo, so a
-// clone can't forge it and can't run code on cd). deactivate is not gated: it
-// only restores saved env/PATH and removes tau-created aliases/functions (no user
-// hook code), so tearing down must always work — even after `tau deny` — and its
-// guards make sourcing it a no-op when nothing was active.
+// Both kinds are trust-gated: the caller sources this stdout, so tau must only
+// emit a script it generated itself during a trusted sync — never repo bytes.
+// A cloned untrusted repo can commit its own .taugres/gen/deactivate.<shell>,
+// and even a teardown script runs arbitrary shell, so refusing an untrusted
+// project is the security boundary (trust lives outside the repo, so a clone
+// can't forge it). The hook's own auto-teardown does not go through here; it
+// reads the deactivate script directly for a project it activated while trusted.
 func emitGenScript(e *Env, args []string, kind string) int {
 	var shell string
 	switch len(args) {
 	case 0:
-		// Default to the current shell via $SHELL. The hook always passes the shell
-		// explicitly (it knows it); this default is for manual `eval "$(tau activate)"`.
+		// Default to the current shell via $SHELL. The hook passes the shell
+		// explicitly; this default is for manual `eval "$(tau activate)"`.
 		sh := os.Getenv("SHELL")
 		if sh == "" {
 			return fail(e, "$SHELL is not set; pass a shell: tau %s <shell> (bash|zsh|fish)", kind)
@@ -1173,14 +1173,12 @@ func emitGenScript(e *Env, args []string, kind string) int {
 		return fail(e, "%v", err)
 	}
 
-	if kind == "activate" {
-		allowed, err := trust.IsAllowed(d.ConfigPath)
-		if err != nil {
-			return fail(e, "checking trust: %v", err)
-		}
-		if !allowed {
-			return fail(e, "project is not trusted; run `tau allow`")
-		}
+	allowed, err := trust.IsAllowed(d.ConfigPath)
+	if err != nil {
+		return fail(e, "checking trust: %v", err)
+	}
+	if !allowed {
+		return fail(e, "project is not trusted; run `tau allow`")
 	}
 
 	stateDir := filepath.Join(d.ProjectRoot, ".taugres")

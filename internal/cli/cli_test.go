@@ -313,15 +313,17 @@ func TestDeactivatePrintsScript(t *testing.T) {
 		t.Errorf("unexpected stderr: %s", errOut)
 	}
 
-	// Unlike activate, deactivate is not trust-gated: teardown must work even
-	// after trust is revoked.
+	// deactivate is trust-gated like activate: a repo can commit its own
+	// deactivate.<shell>, so tau refuses to emit repo bytes for an untrusted
+	// project. The hook's auto-teardown handles a denied-while-active project
+	// separately (it reads the script directly, not via this command).
 	run(t, dir, "deny")
 	code, out, errOut = run(t, dir, "deactivate", "bash")
-	if code != 0 {
-		t.Fatalf("deactivate after deny exit %d: %s", code, errOut)
+	if code == 0 {
+		t.Errorf("deactivate should refuse an untrusted project, got:\n%s", out)
 	}
-	if !strings.Contains(out, "restore environment") {
-		t.Errorf("deactivate should still emit the script after deny:\n%s", out)
+	if !strings.Contains(errOut, "not trusted") {
+		t.Errorf("expected a not-trusted error after deny, got: %q", errOut)
 	}
 }
 
