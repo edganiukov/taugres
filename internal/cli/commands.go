@@ -161,7 +161,7 @@ func runCheck(e *Env, args []string) int {
 
 // --- sync ---
 
-func runSync(e *Env, args []string) (code int) {
+func runSync(e *Env, args []string) int {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	fs.SetOutput(e.Stderr)
 	ifStale := fs.Bool("if-stale", false, "only sync if the config changed since the last sync (used by the shell hook)")
@@ -178,30 +178,17 @@ func runSync(e *Env, args []string) (code int) {
 	}
 	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
 
-	// Maintain the hook's retry guard (gen/tried): a failed or refused sync
-	// records the attempt so the hook does not re-run it every prompt (only when
-	// inputs change); a successful or fresh sync clears it. refused marks the
-	// untrusted --if-stale bail, which exits 0 but must still record.
-	refused := false
-	defer func() {
-		if code != 0 || refused {
-			_ = state.WriteTried(stateDir, render.SupportedShells)
-		} else {
-			_ = state.ClearTried(stateDir)
-		}
-	}()
-
 	// Trust gate first: an untrusted project can never sync (activation would
 	// source shell.fn/shell.hook files and run installs), so bail before any
 	// lock, Starlark eval, or tool work. In hook mode (--if-stale) stay silent —
-	// `tau activate` is the single voice that tells the user to run `tau allow`;
-	// only a manual `tau sync` says so itself.
+	// `tau hook-env` is the single voice that tells the user to run `tau allow`
+	// (it also pre-checks trust, so it normally never gets here); only a manual
+	// `tau sync` says so itself.
 	allowed, err := trust.IsAllowed(d.ConfigPath)
 	if err != nil {
 		return fail(e, "checking trust: %v", err)
 	}
 	if !allowed {
-		refused = true
 		if *ifStale {
 			return 0
 		}
@@ -1212,13 +1199,15 @@ func emitGenScript(e *Env, args []string, kind string) int {
 // every in-project prompt, and ALL hook logic — staleness, the retry guard,
 // auto-sync, trust, activation/deactivation — lives here in Go. Session state
 // round-trips through the TAUGRES_HOOK env var, which the eval'd output itself
-// sets, so the shell holds no state machine at all.
+// sets, so the shell holds no state machine and tau writes no state files.
 //
-// The token is "<proj>|<activate mtime ns>", prefixed with "-" when the state
-// was recorded but nothing activated (untrusted, or no generated script). The
-// dormant prefix keeps once-per-shell semantics for the "not trusted" notice —
-// re-entering the project compares equal and stays silent — and lets the shim
-// skip the tau invocation entirely on prompts outside any project.
+// The token is "<proj>|<activate mtime ns>|<retry fingerprint>", prefixed with
+// "-" when the state was recorded but nothing activated (untrusted, or no
+// generated script). The dormant prefix keeps once-per-shell semantics for the
+// "not trusted" notice — re-entering the project compares equal and stays
+// silent — and lets the shim skip the tau invocation entirely on prompts
+// outside any project. The fingerprint is set after a failed sync attempt so it
+// is not re-run (and its error not re-printed) until the trigger state changes.
 func runHookEnv(e *Env, args []string) int {
 	if len(args) != 1 {
 		return fail(e, "usage: tau hook-env <shell> (bash|zsh|fish)")
@@ -1229,13 +1218,22 @@ func runHookEnv(e *Env, args []string) int {
 	}
 
 	// Previous state from our last eval'd output. A dormant ("-") token records
-	// an attempt with nothing activated: nothing to tear down.
+	// an attempt with nothing activated: nothing to tear down. The fingerprint
+	// and mtime fields contain no '|', so the project (which may) parses from
+	// the right.
 	prev := os.Getenv("TAUGRES_HOOK")
 	prevTok := strings.TrimPrefix(prev, "-")
-	active := prev != "" && prev == prevTok
+	prevFP := ""
+	if i := strings.LastIndexByte(prevTok, '|'); i >= 0 {
+		prevFP = prevTok[i+1:]
+	}
 	activeProj := ""
-	if i := strings.LastIndexByte(prevTok, '|'); active && i >= 0 {
-		activeProj = prevTok[:i]
+	if active := prev != "" && prev == prevTok; active {
+		if rest, ok := strings.CutSuffix(prevTok, "|"+prevFP); ok {
+			if i := strings.LastIndexByte(rest, '|'); i >= 0 {
+				activeProj = rest[:i]
+			}
+		}
 	}
 	// emitDeactivate prints a project's deactivate script (best effort; the
 	// script's own guards make it a no-op if nothing was applied).
@@ -1269,11 +1267,22 @@ func runHookEnv(e *Env, args []string) int {
 	}
 	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
 
-	// Auto-sync when stale, honoring the retry guard (gen/tried) so a failing
-	// sync is attempted once per input state, not every prompt. The sync's own
-	// output goes to stderr; our stdout stays eval-clean.
-	if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && need {
-		if state.ShouldRetry(stateDir, render.SupportedShells) {
+	// Trust decides everything downstream and is cheap to check in-process, so
+	// check it live on every prompt: an untrusted project gets no sync attempt
+	// and no activation — and nothing written anywhere — while `tau allow` takes
+	// effect on the very next prompt with no state to invalidate.
+	allowed, terr := trust.IsAllowed(d.ConfigPath)
+	allowed = allowed && terr == nil
+
+	// Auto-sync when stale. The retry fingerprint carried in the session token
+	// guards a failing sync: it is recorded after a failed attempt and the sync
+	// is retried only when the trigger state (inputs, scripts/tool-dir presence,
+	// probes) changes. The sync's own output goes to stderr; our stdout stays
+	// eval-clean.
+	fp := ""
+	if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && need && allowed {
+		fp = state.SyncFingerprint(stateDir, d.ConfigPath, render.SupportedShells)
+		if fp != prevFP {
 			if activeProj == d.ProjectRoot {
 				// Tear down with the CURRENT deactivate script before the sync
 				// regenerates it, so removed vars/PATH don't leak.
@@ -1281,18 +1290,35 @@ func runHookEnv(e *Env, args []string) int {
 				activeProj = ""
 			}
 			runSync(&Env{Args: nil, Stdout: e.Stderr, Stderr: e.Stderr, Wd: e.Wd}, []string{"--if-stale"})
+			if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && !need {
+				fp = "" // success: drop the guard
+			} else {
+				fp = state.SyncFingerprint(stateDir, d.ConfigPath, render.SupportedShells)
+			}
 		}
 	}
 
-	// Desired activation state: project + activate script mtime (ns). Unchanged
-	// state prints nothing — the common case.
+	// Desired state: project + activate script mtime (ns) + retry fingerprint.
+	// Unchanged state prints nothing — the common case.
 	activate := filepath.Join(state.GenDir(stateDir), "activate."+shell)
 	stamp := ""
 	if fi, err := os.Stat(activate); err == nil {
 		stamp = strconv.FormatInt(fi.ModTime().UnixNano(), 10)
 	}
-	cur := d.ProjectRoot + "|" + stamp
+	cur := d.ProjectRoot + "|" + stamp + "|" + fp
 	if cur == prevTok {
+		return 0
+	}
+	// Only the retry fingerprint changed (a sync just failed, leaving the
+	// generated env as it was): record the state but leave the active env alone
+	// — no deactivate/reactivate churn.
+	prevAct, _ := strings.CutSuffix(prevTok, "|"+prevFP)
+	if d.ProjectRoot+"|"+stamp == prevAct {
+		if prev != prevTok { // preserve dormancy
+			setState("-" + cur)
+		} else {
+			setState(cur)
+		}
 		return 0
 	}
 	if activeProj != "" {
@@ -1303,15 +1329,14 @@ func runHookEnv(e *Env, args []string) int {
 	// project (trust lives outside the repo and cannot be forged by its
 	// contents). Record the state dormant so the notice prints once per shell,
 	// not on every prompt.
-	allowed, err := trust.IsAllowed(d.ConfigPath)
-	if err != nil || !allowed {
+	if !allowed {
 		setState("-" + cur)
 		fmt.Fprintf(e.Stderr, "tau: project is not trusted; run `tau allow`\n")
 		return 0
 	}
 	data, err := os.ReadFile(activate)
 	if err != nil {
-		// No generated script (sync failed/refused); the retry guard governs
+		// No generated script (the sync failed); the fingerprint governs
 		// re-attempts, so just record the state.
 		setState("-" + cur)
 		return 0
@@ -1349,9 +1374,8 @@ func runAllow(e *Env, args []string) int {
 	if err := trust.Allow(er.disc.ConfigPath); err != nil {
 		return fail(e, "recording trust: %v", err)
 	}
-	// Trusting invalidates a recorded refused-sync attempt, so the hook retries
-	// (and succeeds) on the very next prompt.
-	_ = state.ClearTried(filepath.Join(er.disc.ProjectRoot, ".taugres"))
+	// No state to invalidate: the hook re-checks trust live on every prompt, so
+	// the very next one syncs and activates.
 	fmt.Fprintf(e.Stdout, "tau: trusted %s\n", er.disc.ConfigPath)
 	return 0
 }

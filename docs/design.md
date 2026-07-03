@@ -342,14 +342,14 @@ The first three are the **env-trigger** dimensions (`state.NeedsSync`, run
 concurrently) that decide *whether* to sync. The `toolsig` lines drive *what
 work* a sync does — see Per-manager staleness.
 
-**Retry guard.** A failed or refused auto-sync must not be re-run on every
-prompt (it would re-evaluate Starlark and re-print its error). tau records the
-attempt in `.taugres/gen/tried` — one line holding the present+probe token it
-saw — and removes it on a successful sync (and on `tau allow`, which invalidates
-a refused attempt so the very next prompt syncs). `hook-env` then re-syncs
-(`state.ShouldRetry`) only when there is no record, an input changed since it,
-or the recorded token drifted. Because the guard is a file, it is shared by
-every shell: one failure is retried once machine-wide, not once per open shell.
+**Retry guard.** A failed auto-sync must not be re-run on every prompt (it
+would re-evaluate Starlark and re-print its error). After a failed attempt,
+`hook-env` records a fingerprint of the trigger state (`state.SyncFingerprint`:
+newest input mtime, script/tool-dir presence, probe results) in the session
+token and retries only when it changes — so the error prints once per shell per
+state, with no on-disk state at all. Untrusted projects need no guard: trust is
+re-checked in-process on every prompt (a stat), the sync is simply never
+attempted, and `tau allow` therefore takes effect on the very next prompt.
 
 Because everything lives in one file written last, a failed/partial sync never
 marks the environment fresh, and a second shell entering during an in-progress

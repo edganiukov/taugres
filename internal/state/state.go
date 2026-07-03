@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -160,84 +161,43 @@ func TouchManifest(stateDir string) error {
 	return os.Chtimes(ManifestPath(stateDir), now, now)
 }
 
-// --- auto-sync retry guard ---
-
-// TriedName is the retry-guard file (gen/tried). A failed or refused auto-sync
-// records the attempt here; `tau hook-env` then re-syncs (ShouldRetry) only
-// when an input is newer than this file or the recorded state token changed. It
-// is shared by all shells and cleared on a successful sync (and by `tau allow`,
-// which invalidates a refused attempt).
-//
-// Content is one line — <present><probesig>: present is "1"/"0" for "activate
-// scripts, manifest, and every tool dir exist", and probesig is "|<0/1>" per
-// recorded probe, in manifest order.
-const TriedName = "tried"
-
-// TriedPath returns the retry-guard path within a state dir.
-func TriedPath(stateDir string) string {
-	return filepath.Join(GenDir(stateDir), TriedName)
-}
-
-// triedToken computes the retry-guard token — <present><probesig> — from the
-// last-synced manifest.
-func triedToken(stateDir string, shells []string) string {
-	m, err := Load(stateDir)
-	if err != nil {
-		return "0"
+// SyncFingerprint summarizes the staleness-trigger state: the newest input
+// mtime (the config file included, so it works before a first manifest exists),
+// whether the generated scripts and tool dirs are present, and the current
+// probe observations. `tau hook-env` records it in the session token after a
+// failed sync attempt and retries only when it changes, so a persistently
+// failing sync is not re-run (and its error not re-printed) on every prompt.
+// The result contains no '|' so it can ride as one field of the session token.
+func SyncFingerprint(stateDir, configPath string, shells []string) string {
+	var newest int64
+	if fi, err := os.Stat(configPath); err == nil {
+		newest = fi.ModTime().UnixNano()
 	}
 	present := "1"
-	for _, sh := range shells {
-		if _, err := os.Stat(filepath.Join(GenDir(stateDir), "activate."+sh)); err != nil {
+	var bits strings.Builder
+	m, err := Load(stateDir)
+	if err != nil {
+		present = "0"
+	} else {
+		for p := range m.Inputs {
+			if fi, err := os.Stat(p); err == nil && fi.ModTime().UnixNano() > newest {
+				newest = fi.ModTime().UnixNano()
+			}
+		}
+		for _, sh := range shells {
+			if _, err := os.Stat(filepath.Join(GenDir(stateDir), "activate."+sh)); err != nil {
+				present = "0"
+				break
+			}
+		}
+		if missingDir(m.ToolDirs) != "" {
 			present = "0"
-			break
+		}
+		for _, p := range m.Probes {
+			bits.WriteString(boolResult(probeNow(p.Kind, p.Arg)))
 		}
 	}
-	if missingDir(m.ToolDirs) != "" {
-		present = "0"
-	}
-	var sig strings.Builder
-	for _, p := range m.Probes {
-		sig.WriteString("|")
-		sig.WriteString(boolResult(probeNow(p.Kind, p.Arg)))
-	}
-	return present + sig.String()
-}
-
-// WriteTried records a failed/refused auto-sync attempt for the hook's retry
-// guard, computing the state token from the last-synced manifest.
-func WriteTried(stateDir string, shells []string) error {
-	if err := os.MkdirAll(GenDir(stateDir), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(TriedPath(stateDir), []byte(triedToken(stateDir, shells)+"\n"), 0o644)
-}
-
-// ClearTried removes the retry guard so the hook syncs again on the next prompt.
-func ClearTried(stateDir string) error {
-	err := os.Remove(TriedPath(stateDir))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}
-
-// ShouldRetry decides whether a stale environment should be re-synced: yes when
-// there is no recorded attempt, an input changed since it, or the recorded
-// token drifted. This is what keeps a persistently failing sync from being
-// re-run (and its error re-printed) on every prompt.
-func ShouldRetry(stateDir string, shells []string) bool {
-	fi, err := os.Stat(TriedPath(stateDir))
-	if err != nil {
-		return true
-	}
-	if m, err := Load(stateDir); err == nil && inputsNewer(m.Inputs, fi.ModTime()) {
-		return true
-	}
-	rec, err := os.ReadFile(TriedPath(stateDir))
-	if err != nil {
-		return true
-	}
-	return strings.TrimSpace(string(rec)) != triedToken(stateDir, shells)
+	return strconv.FormatInt(newest, 10) + "." + present + bits.String()
 }
 
 // HashFile returns the hex sha256 of a file's contents.

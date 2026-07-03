@@ -250,8 +250,8 @@ Real work happens only on real events:
 
 So you **always get the latest on the next prompt after an edit**, even without
 leaving the project. A persistently failing sync is not retried until the inputs
-change again (recorded in `.taugres/gen/tried`, shared by all shells), so there
-is no re-sync storm.
+change again (tracked in the session token, once per shell), so there is no
+re-sync storm.
 
 ## Root-anchored paths
 
