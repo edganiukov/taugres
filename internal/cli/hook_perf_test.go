@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/edganiukov/taugres/internal/shellhook"
 	"github.com/edganiukov/taugres/internal/testutil"
 )
 
@@ -78,5 +80,33 @@ done
 
 	if perTransition > 100*time.Millisecond {
 		t.Errorf("per-transition time %s exceeds 100ms target", perTransition)
+	}
+}
+
+// TestHookOutsideProjectDoesNotSpawn asserts the fast path stays pure shell:
+// a prompt outside any project (with nothing active) must not exec tau. It
+// points _TAU_BIN at a nonexistent binary so any spawn would error loudly.
+func TestHookOutsideProjectDoesNotSpawn(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	hook, err := shellhook.Hook("bash", "/nonexistent/tau")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Start outside any project, TAUGRES_HOOK unset; run the hook repeatedly.
+	script := "cd " + t.TempDir() + "\n" + string(hook) + `
+for i in $(seq 1 20); do _tau_hook; done
+echo DONE`
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", script)
+	cmd.Env = append(os.Environ(), "TAUGRES_HOOK=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash failed: %v\n%s", err, out)
+	}
+	got := string(out)
+	if strings.TrimSpace(got) != "DONE" {
+		t.Errorf("outside-project prompt spawned tau (or produced output): %q", got)
 	}
 }

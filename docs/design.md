@@ -560,7 +560,9 @@ tau deny                   # revoke trust
 tau clean [--lock]         # remove .taugres/; --lock also drops .taugres.lock
 tau prune                  # remove orphaned trust records
 tau hook <shell>           # print the shell hook (bash|zsh|fish)
-tau activate <shell>       # print the activation script for a trusted project
+tau hook-env <shell>       # used by the hook: env/activation commands for this prompt
+tau activate [shell]       # print the activation script for a trusted project (default: $SHELL)
+tau deactivate [shell]     # print the deactivation script for a trusted project (default: $SHELL)
 tau version
 ```
 

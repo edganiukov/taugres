@@ -31,7 +31,7 @@ func Hook(shell, tauBin string) (string, error) {
 // only in how the hook is wired to prompts/directory changes.
 func posixHook(shell, tauBin string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "_TAU_BIN=%s\n", singleQuote(tauBin))
+	fmt.Fprintf(&b, "_TAU_BIN=%s\n", SingleQuote(tauBin))
 	b.WriteString(hookBody)
 	switch shell {
 	case "zsh":
@@ -42,8 +42,8 @@ func posixHook(shell, tauBin string) string {
 	return b.String()
 }
 
-// singleQuote wraps s as a POSIX single-quoted literal.
-func singleQuote(s string) string {
+// SingleQuote wraps s as a POSIX single-quoted literal.
+func SingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 

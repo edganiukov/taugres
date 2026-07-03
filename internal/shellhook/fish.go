@@ -10,13 +10,13 @@ import (
 // edit takes effect on the next prompt, like bash/zsh — not only on cd).
 func fishHook(tauBin string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "set -g _TAU_BIN %s\n", fishSingleQuote(tauBin))
+	fmt.Fprintf(&b, "set -g _TAU_BIN %s\n", FishSingleQuote(tauBin))
 	b.WriteString(fishHookBody)
 	return b.String()
 }
 
-// fishSingleQuote wraps s as a fish single-quoted literal.
-func fishSingleQuote(s string) string {
+// FishSingleQuote wraps s as a fish single-quoted literal.
+func FishSingleQuote(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `'`, `\'`)
 	return "'" + s + "'"

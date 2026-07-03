@@ -164,7 +164,7 @@ func runCheck(e *Env, args []string) int {
 func runSync(e *Env, args []string) int {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	fs.SetOutput(e.Stderr)
-	ifStale := fs.Bool("if-stale", false, "only sync if the config changed since the last sync (used by the shell hook)")
+	ifStale := fs.Bool("if-stale", false, "only sync if the config changed since the last sync (used by tau hook-env)")
 	verbose := fs.Bool("verbose", false, "print every sync step instead of a single updating line")
 	update := fs.Bool("update", false, "re-resolve unpinned tools/packages to their latest versions and update .taugres.lock")
 	if err := fs.Parse(args); err != nil {
@@ -1261,9 +1261,9 @@ func runHookEnv(e *Env, args []string) int {
 	setToken := func(t hookToken) {
 		// Exported so the next prompt's `tau hook-env` subprocess can read it.
 		if shell == "fish" {
-			fmt.Fprintf(e.Stdout, "set -gx TAUGRES_HOOK %s\n", fishQuote(t.String()))
+			fmt.Fprintf(e.Stdout, "set -gx TAUGRES_HOOK %s\n", shellhook.FishSingleQuote(t.String()))
 		} else {
-			fmt.Fprintf(e.Stdout, "export TAUGRES_HOOK=%s\n", posixQuote(t.String()))
+			fmt.Fprintf(e.Stdout, "export TAUGRES_HOOK=%s\n", shellhook.SingleQuote(t.String()))
 		}
 	}
 
@@ -1368,18 +1368,6 @@ func runHookEnv(e *Env, args []string) int {
 		}
 	}
 	return 0
-}
-
-// posixQuote wraps s as a POSIX single-quoted literal.
-func posixQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// fishQuote wraps s as a fish single-quoted literal.
-func fishQuote(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `'`, `\'`)
-	return "'" + s + "'"
 }
 
 // --- allow / deny ---

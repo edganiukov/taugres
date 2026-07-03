@@ -222,7 +222,8 @@ tools live in mise's shared store, so only their lock entry is dropped.
 | `tau status` | show active project, sync state, and trust |
 | `tau hook <shell>` | print the shell hook (bash, zsh, fish) |
 | `tau hook-env <shell>` | used by the hook: print env/activation commands for this prompt |
-| `tau activate <shell>` | print the activation script for a trusted project |
+| `tau activate [shell]` | print the activation script for a trusted project (default: `$SHELL`) |
+| `tau deactivate [shell]` | print the deactivation script for a trusted project (default: `$SHELL`) |
 | `tau allow` / `tau deny` | trust / revoke trust for the active config |
 | `tau clean [--lock]` | remove `.taugres/`; `--lock` also drops `.taugres.lock` |
 | `tau prune` | remove trust records for projects that no longer exist |

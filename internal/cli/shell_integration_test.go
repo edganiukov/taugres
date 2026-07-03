@@ -336,8 +336,8 @@ echo "SCOPE=${SCOPE:-unset}"`
 
 // TestUntrustedEntryPrintsSingleTrustMessage guards against the double-message
 // regression: entering an untrusted project that is also stale used to print
-// both `tau sync`'s and `tau activate`'s trust messages. Now the auto-sync bails
-// silently for untrusted projects and `tau activate` is the single voice.
+// two trust messages. Now `tau hook-env` is the single voice and prints it once
+// per state.
 func TestUntrustedEntryPrintsSingleTrustMessage(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -609,10 +609,9 @@ func TestBashHookResyncsOnProbeChange(t *testing.T) {
 	}
 
 	// Enter (TRIG unset), then create the probed file and prompt again: the hook
-	// must detect the exists() flip and auto-sync so TRIG becomes set.
-	// No sleep: the resync lands in the same wall-clock second as the first
-	// activation, so this also guards the fix for the mtime-granularity
-	// reactivation gap (the hook forces reactivation after a sync).
+	// must detect the exists() flip and auto-sync so TRIG becomes set. No sleep:
+	// the resync can land in the same wall-clock second, so this also guards that
+	// the nanosecond activate-mtime stamp distinguishes a same-second resync.
 	script := string(hb) + `
 prompt() { local c; for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done; }
 cd "` + repo + `"; prompt; echo "BEFORE TRIG=${TRIG:-unset}"
@@ -641,8 +640,8 @@ func TestBashHookActivatesOnCd(t *testing.T) {
 		t.Skip("bash not available")
 	}
 	// Use the built binary so the hook bakes a real tau path into _TAU_BIN
-	// (the in-process `run` would bake the test binary, and activation now
-	// shells out to `tau activate`).
+	// (the in-process `run` would bake the test binary, and each prompt shells
+	// out to `tau hook-env`).
 	tau := builtTau(t)
 	cfgHome := t.TempDir()
 	cacheHome := t.TempDir()
