@@ -1195,19 +1195,56 @@ func emitGenScript(e *Env, args []string, kind string) int {
 
 // --- hook-env ---
 
+// hookToken is the per-shell session state runHookEnv round-trips through the
+// TAUGRES_HOOK env var, so the shell holds no state machine and tau writes no
+// state files. Its string form is "<applied>|<stamp>|<fp>|<proj>":
+//
+//	applied  1 when this shell has proj's activate script sourced, else 0
+//	stamp    proj's activate-script mtime in ns ("" when there is no script)
+//	fp       retry fingerprint ("" once synced; non-empty after a failed sync)
+//	proj     project root (may contain '|', so it is the trailing field)
+//
+// It is exported so `tau hook-env` (a subprocess) can read it. An empty or
+// foreign value parses as "nothing recorded" and is treated as a clean reset.
+type hookToken struct {
+	applied bool
+	stamp   string
+	fp      string
+	proj    string
+}
+
+// parseHookToken parses a token; ok is false for an empty or non-conforming
+// value (e.g. one written by a different tau version), signalling a clean reset.
+func parseHookToken(s string) (t hookToken, ok bool) {
+	applied, rest, ok := strings.Cut(s, "|")
+	if !ok || (applied != "0" && applied != "1") {
+		return hookToken{}, false
+	}
+	stamp, rest, ok := strings.Cut(rest, "|")
+	if !ok {
+		return hookToken{}, false
+	}
+	fp, proj, ok := strings.Cut(rest, "|")
+	if !ok {
+		return hookToken{}, false
+	}
+	return hookToken{applied: applied == "1", stamp: stamp, fp: fp, proj: proj}, true
+}
+
+func (t hookToken) String() string {
+	applied := "0"
+	if t.applied {
+		applied = "1"
+	}
+	return applied + "|" + t.stamp + "|" + t.fp + "|" + t.proj
+}
+
 // runHookEnv is the hook backend: the shell shim evals this command's stdout on
 // every in-project prompt, and ALL hook logic — staleness, the retry guard,
-// auto-sync, trust, activation/deactivation — lives here in Go. Session state
-// round-trips through the TAUGRES_HOOK env var, which the eval'd output itself
-// sets, so the shell holds no state machine and tau writes no state files.
-//
-// The token is "<proj>|<activate mtime ns>|<retry fingerprint>", prefixed with
-// "-" when the state was recorded but nothing activated (untrusted, or no
-// generated script). The dormant prefix keeps once-per-shell semantics for the
-// "not trusted" notice — re-entering the project compares equal and stays
-// silent — and lets the shim skip the tau invocation entirely on prompts
-// outside any project. The fingerprint is set after a failed sync attempt so it
-// is not re-run (and its error not re-printed) until the trigger state changes.
+// auto-sync, trust, activation/deactivation — lives here in Go. It computes the
+// desired state first and emits at most one transition (tear down the applied
+// project, then activate the target), so the sourced env can never be left torn
+// down or doubly applied.
 func runHookEnv(e *Env, args []string) int {
 	if len(args) != 1 {
 		return fail(e, "usage: tau hook-env <shell> (bash|zsh|fish)")
@@ -1217,46 +1254,36 @@ func runHookEnv(e *Env, args []string) int {
 		return fail(e, "unsupported shell %q (supported: %s)", shell, strings.Join(render.SupportedShells, ", "))
 	}
 
-	// Previous state from our last eval'd output. A dormant ("-") token records
-	// an attempt with nothing activated: nothing to tear down. The fingerprint
-	// and mtime fields contain no '|', so the project (which may) parses from
-	// the right.
-	prev := os.Getenv("TAUGRES_HOOK")
-	prevTok := strings.TrimPrefix(prev, "-")
-	prevFP := ""
-	if i := strings.LastIndexByte(prevTok, '|'); i >= 0 {
-		prevFP = prevTok[i+1:]
+	prev, _ := parseHookToken(os.Getenv("TAUGRES_HOOK"))
+
+	deactivateScript := func(proj string) []byte {
+		data, _ := os.ReadFile(filepath.Join(state.GenDir(filepath.Join(proj, ".taugres")), "deactivate."+shell))
+		return data
 	}
-	activeProj := ""
-	if active := prev != "" && prev == prevTok; active {
-		if rest, ok := strings.CutSuffix(prevTok, "|"+prevFP); ok {
-			if i := strings.LastIndexByte(rest, '|'); i >= 0 {
-				activeProj = rest[:i]
-			}
-		}
-	}
-	// emitDeactivate prints a project's deactivate script (best effort; the
-	// script's own guards make it a no-op if nothing was applied).
-	emitDeactivate := func(proj string) {
-		p := filepath.Join(state.GenDir(filepath.Join(proj, ".taugres")), "deactivate."+shell)
-		if data, err := os.ReadFile(p); err == nil {
-			fmt.Fprint(e.Stdout, string(data))
-		}
-	}
-	// setState emits the shell command that records the session token.
-	setState := func(tok string) {
+	setToken := func(t hookToken) {
+		// Exported so the next prompt's `tau hook-env` subprocess can read it.
 		if shell == "fish" {
-			fmt.Fprintf(e.Stdout, "set -gx TAUGRES_HOOK %s\n", fishQuote(tok))
+			fmt.Fprintf(e.Stdout, "set -gx TAUGRES_HOOK %s\n", fishQuote(t.String()))
 		} else {
-			fmt.Fprintf(e.Stdout, "export TAUGRES_HOOK=%s\n", posixQuote(tok))
+			fmt.Fprintf(e.Stdout, "export TAUGRES_HOOK=%s\n", posixQuote(t.String()))
 		}
+	}
+
+	// Capture the applied project's deactivate script NOW, before any sync can
+	// regenerate it, so a teardown always matches how the env was applied (a
+	// removed var/PATH entry is restored by the script that set it).
+	var teardown []byte
+	if prev.applied {
+		teardown = deactivateScript(prev.proj)
 	}
 
 	d, err := discover.Discover(e.Wd)
 	if err != nil {
-		// Outside any project: tear down whatever was active and forget it.
-		if activeProj != "" {
-			emitDeactivate(activeProj)
+		// Outside any project: tear down whatever this shell applied and forget.
+		if prev.applied {
+			e.Stdout.Write(teardown)
+		}
+		if os.Getenv("TAUGRES_HOOK") != "" {
 			if shell == "fish" {
 				fmt.Fprintln(e.Stdout, "set -e TAUGRES_HOOK")
 			} else {
@@ -1265,84 +1292,83 @@ func runHookEnv(e *Env, args []string) int {
 		}
 		return 0
 	}
-	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
+	proj := d.ProjectRoot
+	stateDir := filepath.Join(proj, ".taugres")
 
 	// Trust decides everything downstream and is cheap to check in-process, so
 	// check it live on every prompt: an untrusted project gets no sync attempt
-	// and no activation — and nothing written anywhere — while `tau allow` takes
-	// effect on the very next prompt with no state to invalidate.
+	// and no activation, and `tau allow` takes effect on the very next prompt
+	// with no state to invalidate. A trust-store read error is fail-closed but
+	// surfaced below rather than silently swallowed.
 	allowed, terr := trust.IsAllowed(d.ConfigPath)
-	allowed = allowed && terr == nil
+	trusted := allowed && terr == nil
 
-	// Auto-sync when stale. The retry fingerprint carried in the session token
-	// guards a failing sync: it is recorded after a failed attempt and the sync
-	// is retried only when the trigger state (inputs, scripts/tool-dir presence,
-	// probes) changes. The sync's own output goes to stderr; our stdout stays
-	// eval-clean.
+	// Auto-sync when stale and trusted, guarded by the retry fingerprint: after a
+	// failed sync fp is non-empty and the attempt is not repeated until the
+	// trigger state (inputs, script/tool-dir presence, probes) changes; a
+	// successful sync clears it. The sync's own output goes to stderr; our stdout
+	// stays eval-clean.
 	fp := ""
-	if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && need && allowed {
-		fp = state.SyncFingerprint(stateDir, d.ConfigPath, render.SupportedShells)
-		if fp != prevFP {
-			if activeProj == d.ProjectRoot {
-				// Tear down with the CURRENT deactivate script before the sync
-				// regenerates it, so removed vars/PATH don't leak.
-				emitDeactivate(activeProj)
-				activeProj = ""
+	if trusted {
+		if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && need {
+			cur := state.SyncFingerprint(stateDir, d.ConfigPath, render.SupportedShells)
+			last := ""
+			if prev.proj == proj {
+				last = prev.fp
 			}
-			runSync(&Env{Args: nil, Stdout: e.Stderr, Stderr: e.Stderr, Wd: e.Wd}, []string{"--if-stale"})
-			if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && !need {
-				fp = "" // success: drop the guard
+			if cur == last {
+				fp = last // same failing state: do not retry
 			} else {
-				fp = state.SyncFingerprint(stateDir, d.ConfigPath, render.SupportedShells)
+				runSync(&Env{Stdout: e.Stderr, Stderr: e.Stderr, Wd: e.Wd}, []string{"--if-stale"})
+				if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && !need {
+					fp = "" // success
+				} else {
+					fp = state.SyncFingerprint(stateDir, d.ConfigPath, render.SupportedShells)
+				}
 			}
 		}
 	}
 
-	// Desired state: project + activate script mtime (ns) + retry fingerprint.
-	// Unchanged state prints nothing — the common case.
+	// Target state: apply proj's activate script iff trusted and (after the
+	// possible sync) the script exists.
 	activate := filepath.Join(state.GenDir(stateDir), "activate."+shell)
 	stamp := ""
 	if fi, err := os.Stat(activate); err == nil {
 		stamp = strconv.FormatInt(fi.ModTime().UnixNano(), 10)
 	}
-	cur := d.ProjectRoot + "|" + stamp + "|" + fp
-	if cur == prevTok {
-		return 0
-	}
-	// Only the retry fingerprint changed (a sync just failed, leaving the
-	// generated env as it was): record the state but leave the active env alone
-	// — no deactivate/reactivate churn.
-	prevAct, _ := strings.CutSuffix(prevTok, "|"+prevFP)
-	if d.ProjectRoot+"|"+stamp == prevAct {
-		if prev != prevTok { // preserve dormancy
-			setState("-" + cur)
-		} else {
-			setState(cur)
-		}
-		return 0
-	}
-	if activeProj != "" {
-		emitDeactivate(activeProj)
+	cur := hookToken{applied: trusted && stamp != "", stamp: stamp, fp: fp, proj: proj}
+	if cur == prev {
+		return 0 // nothing changed — the common case
 	}
 
-	// Trust is the boundary: refuse to emit repo-derived code for an untrusted
-	// project (trust lives outside the repo and cannot be forged by its
-	// contents). Record the state dormant so the notice prints once per shell,
-	// not on every prompt.
-	if !allowed {
-		setState("-" + cur)
-		fmt.Fprintf(e.Stderr, "tau: project is not trusted; run `tau allow`\n")
-		return 0
+	// The sourced env is determined by (applied, proj, stamp); fp and the notice
+	// do not touch it. Re-apply only when that triple changed — so a failed sync
+	// (fp-only change) records the guard without disturbing a working env.
+	if prev.applied != cur.applied || prev.proj != cur.proj || prev.stamp != cur.stamp {
+		if prev.applied {
+			e.Stdout.Write(teardown)
+		}
+		if cur.applied {
+			if data, err := os.ReadFile(activate); err == nil {
+				e.Stdout.Write(data)
+			} else {
+				cur.applied = false // raced: script vanished between stat and read
+			}
+		}
 	}
-	data, err := os.ReadFile(activate)
-	if err != nil {
-		// No generated script (the sync failed); the fingerprint governs
-		// re-attempts, so just record the state.
-		setState("-" + cur)
-		return 0
+	setToken(cur)
+
+	// Explain why an in-project prompt did not activate — once per state, since
+	// we only reach here when the token changed. A missing script while trusted
+	// (stamp == "") is governed by the fp retry guard and `tau status`, so stay
+	// quiet.
+	if !cur.applied {
+		if terr != nil {
+			fmt.Fprintf(e.Stderr, "tau: checking trust: %v\n", terr)
+		} else if !allowed {
+			fmt.Fprintf(e.Stderr, "tau: project is not trusted; run `tau allow`\n")
+		}
 	}
-	setState(cur)
-	fmt.Fprint(e.Stdout, string(data))
 	return 0
 }
 

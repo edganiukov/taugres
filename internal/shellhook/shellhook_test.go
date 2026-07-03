@@ -15,7 +15,7 @@ func TestHookDelegatesToHookEnv(t *testing.T) {
 		`hook-env "$_TAU_SHELL"`, // all logic delegated to tau
 		"_tau_find_config",       // pure-shell gate for out-of-project prompts
 		"TAUGRES_HOOK",           // session state round-trips via env var
-		`""|-*`,                  // dormant states spawn nothing outside projects
+		`""|0\|*`,                // dormant states spawn nothing outside projects
 		"_tau_hook",
 		"PROMPT_COMMAND",
 	} {

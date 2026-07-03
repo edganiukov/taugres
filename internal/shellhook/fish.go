@@ -40,10 +40,9 @@ end
 function _tau_hook --on-event fish_prompt
     set -l proj (_tau_find_config)
     if test -z "$proj"
-        # Outside any project: nothing active (empty) or nothing was ever
-        # activated (dormant "-" state) means there is nothing to tear down —
-        # spawn nothing.
-        if test -z "$TAUGRES_HOOK"; or string match -q -- '-*' "$TAUGRES_HOOK"
+        # Outside any project with nothing sourced (empty or applied-bit 0):
+        # nothing to tear down, so spawn nothing.
+        if test -z "$TAUGRES_HOOK"; or string match -q -- '0|*' "$TAUGRES_HOOK"
             return 0
         end
     end

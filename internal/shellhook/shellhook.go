@@ -49,9 +49,9 @@ func singleQuote(s string) string {
 
 // hookBody is the entire hook: a pure-shell walk to the nearest config dir as a
 // gate, then one `tau hook-env` invocation whose output is eval'd. TAUGRES_HOOK
-// holds the session state ("<proj>|<stamp>", or "-" prefixed when nothing was
-// activated); when it is empty or dormant, prompts outside any project return
-// without spawning anything.
+// holds the session state as "<applied>|..."; the leading applied bit is 0 when
+// nothing is sourced, so outside any project an empty or "0"-prefixed token
+// means there is nothing to tear down and the prompt spawns nothing.
 const hookBody = `# tau shell hook (generated). Do not edit.
 _tau_find_config() {
   # Walk upward from $PWD to the nearest project.tg or workspace.tg directory.
@@ -72,9 +72,9 @@ _tau_hook() {
   local proj
   proj="$(_tau_find_config)"
   if [ -z "$proj" ]; then
-    # Outside any project: nothing active (empty) or nothing was ever activated
-    # (dormant "-" state) means there is nothing to tear down — spawn nothing.
-    case "${TAUGRES_HOOK:-}" in ""|-*) return 0 ;; esac
+    # Outside any project with nothing sourced (empty or applied-bit 0): nothing
+    # to tear down, so spawn nothing.
+    case "${TAUGRES_HOOK:-}" in ""|0\|*) return 0 ;; esac
   fi
   eval "$("$_TAU_BIN" hook-env "$_TAU_SHELL")"
 }
