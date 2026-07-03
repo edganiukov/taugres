@@ -21,15 +21,15 @@ must feel instant. Hard target: **a common directory change ≤ 20ms**.
 
 How the design meets it:
 
-- The shell hook's hot path (nothing changed) is **pure shell** — a config-dir
-  walk plus a few `stat`s (~6ms measured; see `internal/cli/hook_perf_test.go`).
-  It never evaluates Starlark, hashes files, or spawns a subprocess.
+- Prompts outside any project are **pure shell** — a config-dir walk, no
+  subprocess. In-project prompts run one warm `tau hook-env` exec (~2–3ms
+  measured; see `internal/cli/hook_perf_test.go`) that does the staleness check
+  in-process and prints nothing when the state is unchanged.
 - Expensive work (Starlark evaluation, package installs, network) happens only
-  in `tau sync`, which the hook invokes **only when a cheap staleness check
+  in `tau sync`, which `hook-env` invokes **only when a cheap staleness check
   trips**.
-- Activation is delegated to `tau activate` (a subprocess) only on real
-  activation *events* — entering/switching projects or after a change — not on
-  every prompt.
+- Activation code is emitted only on real activation *events* —
+  entering/switching projects or after a change — not on every prompt.
 
 ## Non-goals
 
@@ -126,11 +126,11 @@ configure -> sync -> activate
   tools/packages, and generate shell scripts. This is the only phase that may
   hit the network. Requires trust.
 - **Activate** — the shell hook activates a *trusted* project by `eval`ing
-  `tau activate`'s output; leaving restores prior state.
+  `tau hook-env`'s output; leaving restores prior state.
 
-The hook can **auto-sync on `cd`**: a cheap staleness check decides whether to
-run `tau sync --if-stale` before activating, so editing config takes effect on
-the next prompt without a manual step (see Shell hook).
+The hook **auto-syncs**: a cheap staleness check inside `hook-env` decides
+whether to run a sync before activating, so editing config takes effect on the
+next prompt without a manual step (see Shell hook).
 
 ## Starlark configuration model
 
@@ -294,27 +294,36 @@ eval "$(tau hook bash)"    # ~/.bashrc  (double quotes required)
 tau hook fish | source     # ~/.config/fish/config.fish
 ```
 
-Wiring: zsh uses `chpwd`; fish uses `--on-variable PWD`; bash has no native
-dir-change hook, so the snippet installs itself into `PROMPT_COMMAND`,
+Wiring: zsh uses `chpwd`+`precmd`; fish uses the `fish_prompt` event; bash has
+no native prompt hook, so the snippet installs itself into `PROMPT_COMMAND`,
 preserving any existing scalar or array (bash ≥ 5.1) value.
 
-On each prompt the hook:
+The hook itself is a **minimal shim** (direnv-style) — it holds no state machine
+and parses nothing:
 
-1. walks up to the nearest config dir (pure shell);
-2. computes a cheap staleness signal from a set of independent **checks**, using
-   only shell builtins (no subprocess on the common path);
-3. if stale, runs `tau sync --if-stale` — guarded by a tau-owned retry marker
-   (`.taugres/gen/tried`) so a persistently failing sync is not retried until
-   the inputs change (no re-sync storm), in any shell;
-4. (re)activates via `eval "$(tau activate <shell>)"` when entering/switching or
-   when the generated env changed (tracked by `_TAU_ACT_TOKEN`).
+1. it walks up to the nearest config dir with pure shell — prompts outside any
+   project (with nothing active) spawn no subprocess;
+2. otherwise it runs one `tau hook-env <shell>` and `eval`s its stdout.
+
+`tau hook-env` owns everything in Go: staleness, the retry guard, auto-sync,
+trust, and activation/deactivation. Session state round-trips through the
+`TAUGRES_HOOK` env var, which the eval'd output itself sets — `<proj>|<activate
+mtime>`, prefixed with `-` when the state was recorded but nothing activated
+(untrusted, or no generated script). The dormant prefix keeps the "not trusted"
+notice at once per shell (re-entry compares equal and stays silent) and lets the
+shim skip tau entirely outside projects. On an unchanged state — the common case
+— hook-env prints nothing.
+
+This is both simpler and faster than the previous pure-shell hook, which parsed
+the manifest with builtins on every prompt: one warm Go exec (~2–3ms) beats the
+shell loop plus the `stat` subprocess it needed for its activation stamp
+(~4–5ms), and it stays flat as the manifest grows.
 
 ### Staleness checks
 
 Staleness is a set of independent dimensions, all recorded in one file —
-`.taugres/gen/manifest` — written at the end of a sync. It is a greppable,
-line-based format so the shell hook reads it with pure builtins (no JSON parse,
-no subprocess) while Go reads the same file:
+`.taugres/gen/manifest` — written at the end of a sync (its own mtime is the
+"last synced" anchor):
 
 ```
 input:<sha256>:<abs-path>     a config input (config file, load(...) module, shell.fn/shell.hook file)
@@ -325,37 +334,30 @@ toolsig:<mgr>:<sha256>        per-manager fingerprint of its tools + locked vers
 
 | Dimension | Drift when… |
 | --- | --- |
-| input | a config input's mtime is newer than the manifest (hook) or its content hash changed (`tau status`) |
+| input | a config input's mtime is newer than the manifest (`NeedsSync`) or its content hash changed (`tau status`) |
 | tooldir | a recorded tool bin dir (mise store, pip/uv venv, npm prefix) is missing |
 | probe | an `exists()`/`which()` result changed (a probed file appeared/vanished, a binary was installed/removed) |
 
-The first three are the **env-trigger** dimensions the hook reads to decide
-*whether* to sync. The `toolsig` lines are **Go-only** (the hook ignores unknown
-tags) and drive *what work* a sync does — see Per-manager staleness.
-
-The manifest's own mtime is the "last synced" anchor. On each prompt the hook
-makes **one pass** over the file, dispatching by line tag with builtins only
-(`-nt`, `-d`, `command -v`); the Go evaluators (`NeedsSync`) run the same three
-dimensions **concurrently**. Adding a dimension is a new line tag plus a case in
-the dispatch.
+The first three are the **env-trigger** dimensions (`state.NeedsSync`, run
+concurrently) that decide *whether* to sync. The `toolsig` lines drive *what
+work* a sync does — see Per-manager staleness.
 
 **Retry guard.** A failed or refused auto-sync must not be re-run on every
-prompt (it would re-evaluate Starlark and re-print its error). tau owns this
-state: it records the attempt in `.taugres/gen/tried` — one line holding the
-present+probe token it saw — and removes it on a successful sync (and on
-`tau allow`, which invalidates a refused attempt so the very next prompt syncs).
-The hook then retries only when there is no record, an input is `-nt` the
-record, or its computed token differs — all builtins, folded into the same
-single manifest pass. Because the guard is a file, it is shared by every shell:
-one failure is retried once machine-wide, not once per open shell.
+prompt (it would re-evaluate Starlark and re-print its error). tau records the
+attempt in `.taugres/gen/tried` — one line holding the present+probe token it
+saw — and removes it on a successful sync (and on `tau allow`, which invalidates
+a refused attempt so the very next prompt syncs). `hook-env` then re-syncs
+(`state.ShouldRetry`) only when there is no record, an input changed since it,
+or the recorded token drifted. Because the guard is a file, it is shared by
+every shell: one failure is retried once machine-wide, not once per open shell.
 
 Because everything lives in one file written last, a failed/partial sync never
 marks the environment fresh, and a second shell entering during an in-progress
 sync blocks on the sync lock rather than racing to a half-written env.
 
-Critically, the hook **never sources an in-repo script for the trust decision**;
-it delegates activation to `tau activate`, which refuses to emit anything for an
-untrusted project. See Trust.
+Critically, the shell **never sources an in-repo script for the trust
+decision**; `tau hook-env` refuses to emit activation code for an untrusted
+project. See Trust.
 
 ## Trust
 
@@ -364,8 +366,8 @@ Approving a project with `tau allow` records trust **outside the repo**, under
 the security boundary: a cloned repo cannot grant itself trust, so it cannot run
 code on `cd` until the user explicitly allows it on this machine — even if the
 repo ships a pre-generated `.taugres/gen/activate.*`. The hook enforces this by
-delegating to `tau activate` (which checks the global record) instead of
-sourcing any repo file directly.
+delegating to `tau hook-env` / `tau activate` (which check the global record)
+instead of sourcing any repo file directly.
 
 Trust is **allow-once and path-based**: later edits to a trusted config do not
 require re-approval. This is a deliberate convenience trade-off versus direnv's

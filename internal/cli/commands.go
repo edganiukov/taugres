@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -1129,10 +1130,10 @@ func runStatus(e *Env, args []string) int {
 
 func runHook(e *Env, args []string) int {
 	if len(args) != 1 {
-		return fail(e, "usage: tau hook <shell> (bash|zsh)")
+		return fail(e, "usage: tau hook <shell> (bash|zsh|fish)")
 	}
 	// Bake in the absolute path to this tau binary so the hook invokes exactly
-	// this executable for auto-sync.
+	// this executable via `tau hook-env`.
 	tauBin := "tau"
 	if p, err := os.Executable(); err == nil {
 		tauBin = p
@@ -1203,6 +1204,133 @@ func emitGenScript(e *Env, args []string, kind string) int {
 	}
 	fmt.Fprint(e.Stdout, string(data))
 	return 0
+}
+
+// --- hook-env ---
+
+// runHookEnv is the hook backend: the shell shim evals this command's stdout on
+// every in-project prompt, and ALL hook logic — staleness, the retry guard,
+// auto-sync, trust, activation/deactivation — lives here in Go. Session state
+// round-trips through the TAUGRES_HOOK env var, which the eval'd output itself
+// sets, so the shell holds no state machine at all.
+//
+// The token is "<proj>|<activate mtime ns>", prefixed with "-" when the state
+// was recorded but nothing activated (untrusted, or no generated script). The
+// dormant prefix keeps once-per-shell semantics for the "not trusted" notice —
+// re-entering the project compares equal and stays silent — and lets the shim
+// skip the tau invocation entirely on prompts outside any project.
+func runHookEnv(e *Env, args []string) int {
+	if len(args) != 1 {
+		return fail(e, "usage: tau hook-env <shell> (bash|zsh|fish)")
+	}
+	shell := args[0]
+	if !slices.Contains(render.SupportedShells, shell) {
+		return fail(e, "unsupported shell %q (supported: %s)", shell, strings.Join(render.SupportedShells, ", "))
+	}
+
+	// Previous state from our last eval'd output. A dormant ("-") token records
+	// an attempt with nothing activated: nothing to tear down.
+	prev := os.Getenv("TAUGRES_HOOK")
+	prevTok := strings.TrimPrefix(prev, "-")
+	active := prev != "" && prev == prevTok
+	activeProj := ""
+	if i := strings.LastIndexByte(prevTok, '|'); active && i >= 0 {
+		activeProj = prevTok[:i]
+	}
+	// emitDeactivate prints a project's deactivate script (best effort; the
+	// script's own guards make it a no-op if nothing was applied).
+	emitDeactivate := func(proj string) {
+		p := filepath.Join(state.GenDir(filepath.Join(proj, ".taugres")), "deactivate."+shell)
+		if data, err := os.ReadFile(p); err == nil {
+			fmt.Fprint(e.Stdout, string(data))
+		}
+	}
+	// setState emits the shell command that records the session token.
+	setState := func(tok string) {
+		if shell == "fish" {
+			fmt.Fprintf(e.Stdout, "set -gx TAUGRES_HOOK %s\n", fishQuote(tok))
+		} else {
+			fmt.Fprintf(e.Stdout, "export TAUGRES_HOOK=%s\n", posixQuote(tok))
+		}
+	}
+
+	d, err := discover.Discover(e.Wd)
+	if err != nil {
+		// Outside any project: tear down whatever was active and forget it.
+		if activeProj != "" {
+			emitDeactivate(activeProj)
+			if shell == "fish" {
+				fmt.Fprintln(e.Stdout, "set -e TAUGRES_HOOK")
+			} else {
+				fmt.Fprintln(e.Stdout, "unset TAUGRES_HOOK")
+			}
+		}
+		return 0
+	}
+	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
+
+	// Auto-sync when stale, honoring the retry guard (gen/tried) so a failing
+	// sync is attempted once per input state, not every prompt. The sync's own
+	// output goes to stderr; our stdout stays eval-clean.
+	if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && need {
+		if state.ShouldRetry(stateDir, render.SupportedShells) {
+			if activeProj == d.ProjectRoot {
+				// Tear down with the CURRENT deactivate script before the sync
+				// regenerates it, so removed vars/PATH don't leak.
+				emitDeactivate(activeProj)
+				activeProj = ""
+			}
+			runSync(&Env{Args: nil, Stdout: e.Stderr, Stderr: e.Stderr, Wd: e.Wd}, []string{"--if-stale"})
+		}
+	}
+
+	// Desired activation state: project + activate script mtime (ns). Unchanged
+	// state prints nothing — the common case.
+	activate := filepath.Join(state.GenDir(stateDir), "activate."+shell)
+	stamp := ""
+	if fi, err := os.Stat(activate); err == nil {
+		stamp = strconv.FormatInt(fi.ModTime().UnixNano(), 10)
+	}
+	cur := d.ProjectRoot + "|" + stamp
+	if cur == prevTok {
+		return 0
+	}
+	if activeProj != "" {
+		emitDeactivate(activeProj)
+	}
+
+	// Trust is the boundary: refuse to emit repo-derived code for an untrusted
+	// project (trust lives outside the repo and cannot be forged by its
+	// contents). Record the state dormant so the notice prints once per shell,
+	// not on every prompt.
+	allowed, err := trust.IsAllowed(d.ConfigPath)
+	if err != nil || !allowed {
+		setState("-" + cur)
+		fmt.Fprintf(e.Stderr, "tau: project is not trusted; run `tau allow`\n")
+		return 0
+	}
+	data, err := os.ReadFile(activate)
+	if err != nil {
+		// No generated script (sync failed/refused); the retry guard governs
+		// re-attempts, so just record the state.
+		setState("-" + cur)
+		return 0
+	}
+	setState(cur)
+	fmt.Fprint(e.Stdout, string(data))
+	return 0
+}
+
+// posixQuote wraps s as a POSIX single-quoted literal.
+func posixQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// fishQuote wraps s as a fish single-quoted literal.
+func fishQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `'`, `\'`)
+	return "'" + s + "'"
 }
 
 // --- allow / deny ---

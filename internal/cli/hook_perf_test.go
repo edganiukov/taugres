@@ -2,24 +2,28 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
 
-	"github.com/edganiukov/taugres/internal/shellhook"
 	"github.com/edganiukov/taugres/internal/testutil"
 )
 
 // TestHookTransitionPerformance times the transition cycle
 // outside -> workspace -> nested -> workspace -> outside and asserts it stays
-// well under the 100ms-per-change target. The hook is pure shell and never
-// invokes tau or evaluates Starlark on the hot path.
+// well under the 100ms-per-change target. Each in-project prompt runs one
+// `tau hook-env` (all logic in Go); prompts outside any project are pure shell.
 func TestHookTransitionPerformance(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("bash not available")
 	}
-	isolate(t)
+	tau := builtTau(t)
+
+	cfgHome := t.TempDir()
+	cacheHome := t.TempDir()
+	env := append(os.Environ(), "XDG_CONFIG_HOME="+cfgHome, "XDG_CACHE_HOME="+cacheHome)
 
 	repo := testutil.TempWorkspace(t)
 	testutil.WriteFile(t, repo, "workspace.tg", "project(\"root\")\nshell.env(\"SCOPE\",\"root\")\n")
@@ -30,23 +34,25 @@ func TestHookTransitionPerformance(t *testing.T) {
 		if sub != "" {
 			wd = repo + "/" + sub
 		}
-		if code, _, e := run(t, wd, "allow"); code != 0 {
-			t.Fatalf("allow %s: %s", sub, e)
-		}
-		if code, _, e := run(t, wd, "sync"); code != 0 {
-			t.Fatalf("sync %s: %s", sub, e)
+		for _, cmd := range []string{"allow", "sync"} {
+			c := exec.Command(tau, cmd)
+			c.Dir = wd
+			c.Env = env
+			if out, err := c.CombinedOutput(); err != nil {
+				t.Fatalf("tau %s %s: %v\n%s", cmd, sub, err, out)
+			}
 		}
 	}
 
-	// Empty tau path: the fast path must never shell out for fresh projects.
-	hook, err := shellhook.Hook("bash", "")
+	hookCmd := exec.Command(tau, "hook", "bash")
+	hookCmd.Env = env
+	hook, err := hookCmd.Output()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("hook: %v", err)
 	}
 
 	const iterations = 50
-	script := hook + fmt.Sprintf(`
-_TAU_SHELL=bash
+	script := string(hook) + fmt.Sprintf(`
 for i in $(seq 1 %d); do
   cd /tmp;          _tau_hook
   cd "%s";          _tau_hook
@@ -56,7 +62,9 @@ done
 `, iterations, repo, repo, repo)
 
 	start := time.Now()
-	out, err := exec.Command(bash, "--noprofile", "--norc", "-c", script).CombinedOutput()
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", script)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash failed: %v\n%s", err, out)
 	}

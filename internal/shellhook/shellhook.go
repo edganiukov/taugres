@@ -1,7 +1,9 @@
 // Package shellhook generates the shell integration snippet installed via
-// `eval "$(tau hook zsh)"`. The hook must be cheap: it never evaluates
-// Starlark, runs package managers, or does heavy filesystem scans. It only
-// finds the nearest config directory and sources already-generated scripts.
+// `eval "$(tau hook zsh)"`. The hook is a minimal shim: it finds the nearest
+// config directory with pure shell (so prompts outside any project spawn no
+// subprocess) and delegates everything else — staleness, auto-sync, trust,
+// activation — to `tau hook-env`, which owns all logic in Go and round-trips
+// session state through the TAUGRES_HOOK env var set by its own eval'd output.
 package shellhook
 
 import (
@@ -13,8 +15,7 @@ import (
 var SupportedShells = []string{"bash", "zsh", "fish"}
 
 // Hook returns the shell hook script for the given shell. tauBin is the path to
-// the tau executable, invoked (as `tau sync --if-stale`) only when the cheap
-// staleness check indicates the environment needs regenerating.
+// the tau executable the shim invokes as `tau hook-env <shell>`.
 func Hook(shell, tauBin string) (string, error) {
 	switch shell {
 	case "bash", "zsh":
@@ -27,11 +28,11 @@ func Hook(shell, tauBin string) (string, error) {
 }
 
 // posixHook returns a bash/zsh compatible hook. The shell-specific difference is
-// only in how the hook is wired to directory changes.
+// only in how the hook is wired to prompts/directory changes.
 func posixHook(shell, tauBin string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "_TAU_BIN=%s\n", singleQuote(tauBin))
-	b.WriteString(hookCommon)
+	b.WriteString(hookBody)
 	switch shell {
 	case "zsh":
 		b.WriteString(zshWiring)
@@ -46,10 +47,12 @@ func singleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// hookCommon contains the core logic shared by bash and zsh. It caches the
-// active project root in _TAU_ACTIVE_ROOT to avoid work when the directory has
-// not changed projects.
-const hookCommon = `# tau shell hook (generated). Do not edit.
+// hookBody is the entire hook: a pure-shell walk to the nearest config dir as a
+// gate, then one `tau hook-env` invocation whose output is eval'd. TAUGRES_HOOK
+// holds the session state ("<proj>|<stamp>", or "-" prefixed when nothing was
+// activated); when it is empty or dormant, prompts outside any project return
+// without spawning anything.
+const hookBody = `# tau shell hook (generated). Do not edit.
 _tau_find_config() {
   # Walk upward from $PWD to the nearest project.tg or workspace.tg directory.
   local dir="$PWD"
@@ -65,122 +68,15 @@ _tau_find_config() {
   return 1
 }
 
-_tau_gen_dir() {
-  printf '%s/.taugres/gen' "$1"
-}
-
-# _tau_mtime prints a file's modification time in seconds (GNU or BSD stat).
-_tau_mtime() {
-  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
-}
-
-# _tau_deactivate sources a project's deactivate script if present.
-_tau_deactivate() {
-  local d="$(_tau_gen_dir "$1")/deactivate.$_TAU_SHELL"
-  [ -f "$d" ] && source "$d"
-}
-
-# _tau_teardown deactivates the currently-active project, if any, and forgets it.
-_tau_teardown() {
-  [ -n "${_TAU_ACTIVE_ROOT:-}" ] || return 0
-  _tau_deactivate "$_TAU_ACTIVE_ROOT"
-  unset _TAU_ACTIVE_ROOT
-}
-
-# The hook runs on every prompt/dir-change. The common case (nothing changed)
-# costs only a few stats and no subprocess. It shells out to \x60tau sync --if-stale\x60
-# only when the manifest shows drift (guarded by the tau-owned gen/tried marker
-# so a failing sync is not retried until inputs change), and delegates
-# activation to \x60tau activate\x60. It never evaluates Starlark or runs package
-# managers itself.
 _tau_hook() {
-  local proj gen_dir activate manifest tried
+  local proj
   proj="$(_tau_find_config)"
-
-  # Outside any project: tear down and stop. Drop the activation token only when
-  # something was active, so returning to a never-activated (e.g. untrusted)
-  # project does not re-run \x60tau activate\x60 and re-print its notice every cd.
   if [ -z "$proj" ]; then
-    [ -n "${_TAU_ACTIVE_ROOT:-}" ] && { _tau_teardown; unset _TAU_ACT_TOKEN; }
-    return 0
+    # Outside any project: nothing active (empty) or nothing was ever activated
+    # (dormant "-" state) means there is nothing to tear down — spawn nothing.
+    case "${TAUGRES_HOOK:-}" in ""|-*) return 0 ;; esac
   fi
-
-  gen_dir="$(_tau_gen_dir "$proj")"
-  activate="$gen_dir/activate.$_TAU_SHELL"
-  manifest="$gen_dir/manifest"
-  tried="$gen_dir/tried"
-
-  # Cheap staleness check using only shell builtins (-f/-nt/-d, command -v) — no
-  # subprocess on the common (unchanged) path. One pass over the single manifest,
-  # dispatched by line tag: input:<hash>:<path>, tooldir:<path>,
-  # probe:<kind>|<arg>|<result>.
-  local stale= present=1 probesig= retry= have_tried= line rest p d kind arg rec now want seen
-  [ -f "$tried" ] && have_tried=1
-  { [ -f "$activate" ] && [ -f "$manifest" ]; } || { stale=1; present=0; }
-  if [ -f "$manifest" ]; then
-    while IFS= read -r line; do
-      case "$line" in
-        input:*)
-          p=${line#input:}; p=${p#*:}
-          [ -n "$p" ] || continue
-          [ "$p" -nt "$manifest" ] && stale=1
-          [ -n "$have_tried" ] && [ "$p" -nt "$tried" ] && retry=1 ;;
-        tooldir:*)
-          d=${line#tooldir:}
-          [ -n "$d" ] && [ ! -d "$d" ] && { stale=1; present=0; } ;;
-        probe:*)
-          rest=${line#probe:}
-          kind=${rest%%|*}; rest=${rest#*|}; arg=${rest%|*}; rec=${rest##*|}
-          case "$kind" in
-            exists) [ -e "$arg" ] && now=1 || now=0; want=$rec ;;
-            which)  command -v "$arg" >/dev/null 2>&1 && now=1 || now=0
-                    [ -n "$rec" ] && want=1 || want=0 ;;
-            *) now=0; want=0 ;;
-          esac
-          probesig="$probesig|$now"
-          [ "$now" = "$want" ] || stale=1 ;;
-      esac
-    done < "$manifest"
-  fi
-
-  if [ -n "$stale" ] && [ -n "${_TAU_BIN:-}" ]; then
-    # Retry guard, owned by tau: a failed or refused sync records the attempt in
-    # gen/tried (content: the present+probe state it saw); a successful sync (or
-    # \x60tau allow\x60) removes it. Retry only when there is no record, an input is
-    # newer than it (checked in the loop above), or the recorded state drifted —
-    # so a persistently failing sync is not re-run every prompt, in any shell.
-    if [ -n "$have_tried" ]; then
-      seen=
-      IFS= read -r seen < "$tried" 2>/dev/null
-      [ "$seen" = "$present$probesig" ] || retry=1
-    else
-      retry=1
-    fi
-    if [ -n "$retry" ]; then
-      # If this project is active, tear it down with the CURRENT deactivate
-      # script before the sync regenerates it, so removed vars/PATH don't leak.
-      [ "${_TAU_ACTIVE_ROOT:-}" = "$proj" ] && _tau_teardown
-      ( cd "$proj" && "$_TAU_BIN" sync --if-stale )
-      unset _TAU_ACT_TOKEN   # force the (re)activation check below
-    fi
-  fi
-
-  # (Re)activate on entering/switching, or when the env changed. Delegated to
-  # \x60tau activate\x60, which refuses untrusted projects (trust lives outside the
-  # repo, so a cloned repo can't run code on cd) and is the single voice for
-  # "not trusted"/"not synced". Guarded by _TAU_ACT_TOKEN (the activate mtime) so
-  # it runs at most once per state.
-  local stamp; stamp="$(_tau_mtime "$activate")"
-  local acttok="$proj|$stamp"
-  if [ "$acttok" != "${_TAU_ACT_TOKEN:-}" ]; then
-    _TAU_ACT_TOKEN="$acttok"
-    _tau_teardown
-    if [ -n "${_TAU_BIN:-}" ]; then
-      local _tau_script
-      _tau_script="$( ( cd "$proj" && "$_TAU_BIN" activate "$_TAU_SHELL" ) )"
-      [ -n "$_tau_script" ] && { eval "$_tau_script"; _TAU_ACTIVE_ROOT="$proj"; }
-    fi
-  fi
+  eval "$("$_TAU_BIN" hook-env "$_TAU_SHELL")"
 }
 `
 

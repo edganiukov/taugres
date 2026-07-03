@@ -20,18 +20,19 @@ the hook and it silently fails to install. On bash the hook installs itself into
 `PROMPT_COMMAND` so it runs on every `cd` (bash has no native directory-change
 hook); it preserves any existing `PROMPT_COMMAND` (scalar or the bash 5.1+ array
 form), but to be safe put the `eval` line **at the end of `~/.bashrc`**, after
-your own `PROMPT_COMMAND` setup. zsh uses `chpwd`; fish uses `--on-variable PWD`.
+your own `PROMPT_COMMAND` setup. zsh uses `chpwd`+`precmd`; fish uses the
+`fish_prompt` event.
 
 ### Auto-sync on `cd`
 
-On every prompt/`cd` the hook does a cheap pure-shell check (is any config input
-newer than the last sync, or a generated script / tool dir missing?) and, only
-if needed, runs `tau sync` for you before re-activating — so editing
-`workspace.tg`, a loaded module, or a `shell.fn`/`shell.hook` file takes effect
-on your next prompt with no manual step, even without leaving the project. The
-common case (nothing changed) never shells out to `tau`, keeping the hot path
-fast. Concurrent syncs are serialized by a per-project lock; a failing sync isn't
-retried until inputs change (see [Performance](#performance)).
+The hook is a tiny shim: inside a project it runs one `tau hook-env`, which
+checks whether any config input changed since the last sync (or a generated
+script / tool dir went missing) and, only if needed, runs `tau sync` for you
+before re-activating — so editing `workspace.tg`, a loaded module, or a
+`shell.fn`/`shell.hook` file takes effect on your next prompt with no manual
+step, even without leaving the project. Prompts outside any project spawn
+nothing. Concurrent syncs are serialized by a per-project lock; a failing sync
+isn't retried until inputs change (see [Performance](#performance)).
 
 ## Trust
 
@@ -42,9 +43,9 @@ Trust is recorded **outside the repo** (under
 `${XDG_CONFIG_HOME:-~/.config}/taugres/trust/`, keyed by config path) — a cloned
 repo cannot grant itself trust, so it can't run code on `cd` until you explicitly
 `tau allow` on your machine. The shell hook delegates activation to
-`tau activate`, which refuses to emit anything for an untrusted project; it never
-sources an in-repo file that could be forged. `tau prune` removes trust records
-for projects that no longer exist.
+`tau hook-env`, which refuses to emit activation code for an untrusted project;
+the shell never sources an in-repo file that could be forged. `tau prune`
+removes trust records for projects that no longer exist.
 
 ## Config example (`workspace.tg`)
 
@@ -101,11 +102,11 @@ Both only *read* the environment — they never run a command or write anything.
 Because their result depends on the host filesystem/PATH, treat them as an escape
 hatch: a config that branches on them is only as reproducible as what it probes.
 
-Probe results are recorded at sync time, and the shell hook re-checks them on
-every prompt (with plain builtins — `[ -e ]` / `command -v`, no subprocess), so
-creating the probed file or installing the binary auto-syncs on your next prompt
-just like a config edit does. (`which` detection is by presence; a binary that
-*moves* without a presence change is picked up by `tau status`/manual sync.)
+Probe results are recorded at sync time and re-checked on every in-project
+prompt, so creating the probed file or installing the binary auto-syncs on your
+next prompt just like a config edit does. (`which` detection is by presence; a
+binary that *moves* without a presence change is picked up by `tau
+status`/manual sync.)
 
 ## Tools and packages
 
@@ -220,6 +221,7 @@ tools live in mise's shared store, so only their lock entry is dropped.
 | `tau update [name...]` | re-resolve unpinned tools/packages to latest (all, or just those named; `<manager>:name` to disambiguate) |
 | `tau status` | show active project, sync state, and trust |
 | `tau hook <shell>` | print the shell hook (bash, zsh, fish) |
+| `tau hook-env <shell>` | used by the hook: print env/activation commands for this prompt |
 | `tau activate <shell>` | print the activation script for a trusted project |
 | `tau allow` / `tau deny` | trust / revoke trust for the active config |
 | `tau clean [--lock]` | remove `.taugres/`; `--lock` also drops `.taugres.lock` |
@@ -228,21 +230,23 @@ tools live in mise's shared store, so only their lock entry is dropped.
 
 ## Performance
 
-On a typical prompt/`cd` where nothing changed, the shell hook does almost no
-work: it walks up to the nearest config directory and a few `stat`s decide there
-is nothing to do (~6ms — see `internal/cli/hook_perf_test.go`). It never parses
-the manifest or hashes files inline, and spawns no subprocess.
+Prompts outside any project are pure shell — a config-dir walk, no subprocess
+(<1ms). Inside a project, each prompt runs one `tau hook-env`, which does the
+staleness check in-process and prints nothing when the state is unchanged
+(~2–3ms; see `internal/cli/hook_perf_test.go`).
 
-It shells out only on real events:
+Real work happens only on real events:
 
-- **On a change**, it runs `tau sync --if-stale` (which *does* evaluate Starlark
-  and may run mise/pip/npm). The staleness check trips when any recorded
-  **config input** — the active config file, a `load(...)` module, or a
+- **On a change**, `hook-env` runs a sync (which *does* evaluate Starlark and
+  may run mise/pip/npm). The staleness check trips when any recorded **config
+  input** — the active config file, a `load(...)` module, or a
   `shell.fn`/`shell.hook` file — is newer than the last completed sync, or a
-  generated script / tool directory is missing.
-- **On (re)activation** (entering/switching projects, or after a change), it
-  runs `tau activate`, which enforces trust and emits the script to `eval`. This
-  is the security boundary — the hook never sources an in-repo file directly.
+  generated script / tool directory is missing, or an `exists()`/`which()`
+  probe flipped.
+- **On (re)activation** (entering/switching projects, or after a change),
+  `hook-env` emits the activation script for the shell to `eval` — after
+  enforcing trust. This is the security boundary: the shell never sources an
+  in-repo file that tau did not vouch for.
 
 So you **always get the latest on the next prompt after an edit**, even without
 leaving the project. A persistently failing sync is not retried until the inputs

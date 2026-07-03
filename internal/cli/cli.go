@@ -56,6 +56,8 @@ func dispatch(e *Env, cmd string, rest []string) int {
 		return runStatus(e, rest)
 	case "hook":
 		return runHook(e, rest)
+	case "hook-env":
+		return runHookEnv(e, rest)
 	case "activate":
 		return runActivate(e, rest)
 	case "deactivate":
@@ -95,6 +97,7 @@ Usage:
   tau clean [--lock]         remove generated state (.taugres/); --lock also drops .taugres.lock
   tau prune                  remove trust records for projects that no longer exist
   tau hook <shell>           print the shell hook (bash|zsh|fish)
+  tau hook-env <shell>       used by the hook: print env/activation commands for this prompt
   tau activate [shell]       print the activation script for a trusted project (default: current shell)
   tau deactivate [shell]     print the deactivation script for the active project (default: current shell)
   tau version                print version

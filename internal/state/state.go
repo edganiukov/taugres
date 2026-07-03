@@ -23,27 +23,22 @@ import (
 const GenDirName = "gen"
 
 // ManifestName is the single per-project state file. It records everything the
-// staleness checks need — one tagged line per entry — so the shell hook can
-// read it with pure builtins (no JSON parsing, no subprocess) while Go reads the
-// same file. It is written last in a sync, so its own mtime is the "last
-// synced" anchor the mtime checks compare against.
-//
-// Each line is `tag:payload`, greppable by tag:
+// staleness checks need — one greppable `tag:payload` line per entry. It is
+// written last in a sync, so its own mtime is the "last synced" anchor the
+// mtime checks compare against.
 //
 //	input:<sha256>:<abs-path>     a config input (config file, loaded module, fn/hook source file)
 //	tooldir:<abs-path>            a tool bin dir that must exist
 //	probe:<kind>|<arg>|<result>   an exists()/which() observation
 //	toolsig:<mgr>:<sha256>        per-manager fingerprint of its tools + locked versions
-//
-// The shell hook only reads input/tooldir/probe lines and ignores the rest, so
-// toolsig is Go-only and safe to add without touching the hook.
 const ManifestName = "manifest"
 
 // Manifest is the parsed state file.
 type Manifest struct {
 	// Inputs maps each config-input file (the config, loaded modules, and
-	// fn/hook source files) to its content hash. A newer mtime (the cheap hook
-	// check) or a changed hash (the thorough `tau status` check) is stale.
+	// fn/hook source files) to its content hash. A newer mtime (the cheap
+	// NeedsSync check) or a changed hash (the thorough `tau status` check) is
+	// stale.
 	Inputs map[string]string
 	// ToolDirs are bin dirs that must exist on disk; a missing one is stale. It
 	// holds the mise store bin dirs followed by each package manager's prefix bin;
@@ -168,15 +163,14 @@ func TouchManifest(stateDir string) error {
 // --- auto-sync retry guard ---
 
 // TriedName is the retry-guard file (gen/tried). A failed or refused auto-sync
-// records the attempt here; the shell hook then re-runs `tau sync --if-stale`
-// only when an input is newer than this file or the recorded state token
-// changed. It is shared by all shells and cleared on a successful sync (and by
-// `tau allow`, which invalidates a refused attempt).
+// records the attempt here; `tau hook-env` then re-syncs (ShouldRetry) only
+// when an input is newer than this file or the recorded state token changed. It
+// is shared by all shells and cleared on a successful sync (and by `tau allow`,
+// which invalidates a refused attempt).
 //
-// Content is one line — <present><probesig> — mirroring exactly what the hook
-// computes with builtins: present is "1"/"0" for "activate scripts, manifest,
-// and every tool dir exist", and probesig is "|<0/1>" per recorded probe, in
-// manifest order.
+// Content is one line — <present><probesig>: present is "1"/"0" for "activate
+// scripts, manifest, and every tool dir exist", and probesig is "|<0/1>" per
+// recorded probe, in manifest order.
 const TriedName = "tried"
 
 // TriedPath returns the retry-guard path within a state dir.
@@ -184,33 +178,38 @@ func TriedPath(stateDir string) string {
 	return filepath.Join(GenDir(stateDir), TriedName)
 }
 
+// triedToken computes the retry-guard token — <present><probesig> — from the
+// last-synced manifest.
+func triedToken(stateDir string, shells []string) string {
+	m, err := Load(stateDir)
+	if err != nil {
+		return "0"
+	}
+	present := "1"
+	for _, sh := range shells {
+		if _, err := os.Stat(filepath.Join(GenDir(stateDir), "activate."+sh)); err != nil {
+			present = "0"
+			break
+		}
+	}
+	if missingDir(m.ToolDirs) != "" {
+		present = "0"
+	}
+	var sig strings.Builder
+	for _, p := range m.Probes {
+		sig.WriteString("|")
+		sig.WriteString(boolResult(probeNow(p.Kind, p.Arg)))
+	}
+	return present + sig.String()
+}
+
 // WriteTried records a failed/refused auto-sync attempt for the hook's retry
 // guard, computing the state token from the last-synced manifest.
 func WriteTried(stateDir string, shells []string) error {
-	present := "1"
-	var sig strings.Builder
-	m, err := Load(stateDir)
-	if err != nil {
-		present = "0"
-	} else {
-		for _, sh := range shells {
-			if _, err := os.Stat(filepath.Join(GenDir(stateDir), "activate."+sh)); err != nil {
-				present = "0"
-				break
-			}
-		}
-		if missingDir(m.ToolDirs) != "" {
-			present = "0"
-		}
-		for _, p := range m.Probes {
-			sig.WriteString("|")
-			sig.WriteString(boolResult(probeNow(p.Kind, p.Arg)))
-		}
-	}
 	if err := os.MkdirAll(GenDir(stateDir), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(TriedPath(stateDir), []byte(present+sig.String()+"\n"), 0o644)
+	return os.WriteFile(TriedPath(stateDir), []byte(triedToken(stateDir, shells)+"\n"), 0o644)
 }
 
 // ClearTried removes the retry guard so the hook syncs again on the next prompt.
@@ -220,6 +219,25 @@ func ClearTried(stateDir string) error {
 		return nil
 	}
 	return err
+}
+
+// ShouldRetry decides whether a stale environment should be re-synced: yes when
+// there is no recorded attempt, an input changed since it, or the recorded
+// token drifted. This is what keeps a persistently failing sync from being
+// re-run (and its error re-printed) on every prompt.
+func ShouldRetry(stateDir string, shells []string) bool {
+	fi, err := os.Stat(TriedPath(stateDir))
+	if err != nil {
+		return true
+	}
+	if m, err := Load(stateDir); err == nil && inputsNewer(m.Inputs, fi.ModTime()) {
+		return true
+	}
+	rec, err := os.ReadFile(TriedPath(stateDir))
+	if err != nil {
+		return true
+	}
+	return strings.TrimSpace(string(rec)) != triedToken(stateDir, shells)
 }
 
 // HashFile returns the hex sha256 of a file's contents.
@@ -267,8 +285,7 @@ func boolResult(ok bool) string {
 	return "0"
 }
 
-// probeNow returns a probe's current boolean observation — the value the shell
-// hook folds into its probe signal with `[ -e ]` / `command -v`.
+// probeNow returns a probe's current boolean observation.
 func probeNow(kind, arg string) bool {
 	switch kind {
 	case "exists":

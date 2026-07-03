@@ -5,22 +5,17 @@ import (
 	"testing"
 )
 
-func TestHookContainsAutoSync(t *testing.T) {
+func TestHookDelegatesToHookEnv(t *testing.T) {
 	out, err := Hook("bash", "/usr/local/bin/tau")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
 		"_TAU_BIN='/usr/local/bin/tau'",
-		"sync --if-stale",
-		`activate "$_TAU_SHELL"`, // activation delegated to `tau activate` (trust gate)
-		`-nt "$manifest"`,        // staleness: an input newer than the manifest
-		`"$gen_dir/manifest"`,    // single tagged state file
-		"input:*",                // config inputs tracked
-		"tooldir:*",              // tool dirs tracked
-		"probe:*",                // exists()/which() probes tracked
-		`"$gen_dir/tried"`,       // tau-owned retry guard (storm protection)
-		"_TAU_ACT_TOKEN",         // re-activate when the generated env changes
+		`hook-env "$_TAU_SHELL"`, // all logic delegated to tau
+		"_tau_find_config",       // pure-shell gate for out-of-project prompts
+		"TAUGRES_HOOK",           // session state round-trips via env var
+		`""|-*`,                  // dormant states spawn nothing outside projects
 		"_tau_hook",
 		"PROMPT_COMMAND",
 	} {
@@ -29,7 +24,13 @@ func TestHookContainsAutoSync(t *testing.T) {
 		}
 	}
 	if strings.Contains(out, ".trusted") {
-		t.Errorf("hook must not gate on the forgeable in-repo .trusted marker:\n%s", out)
+		t.Errorf("hook must not gate on a forgeable in-repo marker:\n%s", out)
+	}
+	// The shim must hold no hook logic: no manifest parsing, no sync invocation.
+	for _, reject := range []string{"manifest", "sync --if-stale", "probe"} {
+		if strings.Contains(out, reject) {
+			t.Errorf("bash hook should delegate %q handling to tau hook-env:\n%s", reject, out)
+		}
 	}
 }
 
@@ -53,20 +54,17 @@ func TestHookQuotesBinPath(t *testing.T) {
 	}
 }
 
-func TestHookFishUsesOnVariablePwd(t *testing.T) {
+func TestHookFishUsesPromptEvent(t *testing.T) {
 	out, err := Hook("fish", "/usr/local/bin/tau")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
 		"set -g _TAU_BIN '/usr/local/bin/tau'",
-		"function _tau_hook --on-variable PWD",
-		"sync --if-stale",
-		"activate fish",
-		`-nt "$manifest"`,
-		"$gen_dir/manifest",
-		"$gen_dir/tried",
-		"_TAU_ACT_TOKEN",
+		"function _tau_hook --on-event fish_prompt",
+		"hook-env fish | source",
+		"_tau_find_config",
+		"TAUGRES_HOOK",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("fish hook missing %q", want)
