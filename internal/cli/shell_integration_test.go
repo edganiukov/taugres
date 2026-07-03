@@ -8,9 +8,229 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/edganiukov/taugres/internal/testutil"
 )
+
+// TestAutosyncSkipsInstallsWhenToolsUnchanged proves the shell-prep/install
+// split: a config edit that changes only shell state (an env var) regenerates
+// the scripts without invoking mise at all, while changing the tool set does
+// re-invoke it. A fake mise logs every call so we can assert this directly.
+func TestAutosyncSkipsInstallsWhenToolsUnchanged(t *testing.T) {
+	tau := builtTau(t)
+
+	// Fake mise: `where` resolves to a prebuilt store path; every other call is a
+	// no-op. It appends its args to a log so we can see whether tool work ran.
+	store := testutil.TempWorkspace(t)
+	testutil.WriteExec(t, store, "node/1/bin/node", "#!/bin/sh\n")
+	testutil.WriteExec(t, store, "node/2/bin/node", "#!/bin/sh\n")
+	fakeBin := t.TempDir()
+	miseLog := filepath.Join(t.TempDir(), "mise.log")
+	miseScript := "#!/bin/sh\n" +
+		"echo \"$@\" >> \"" + miseLog + "\"\n" +
+		"case \"$1\" in\n" +
+		"  where) echo \"" + store + "/$(echo $2 | tr '@' '/')\" ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mise"), []byte(miseScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgHome := t.TempDir()
+	cacheHome := t.TempDir()
+	env := append(os.Environ(),
+		"XDG_CONFIG_HOME="+cfgHome,
+		"XDG_CACHE_HOME="+cacheHome,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	repo := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, repo, "workspace.tg",
+		"project(\"demo\")\nshell.env(\"SCOPE\", \"root\")\nmise.tool(\"node@1\")\n")
+
+	runTau := func(args ...string) {
+		t.Helper()
+		c := exec.Command(tau, args...)
+		c.Dir = repo
+		c.Env = env
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("tau %v: %v\n%s", args, err, out)
+		}
+	}
+	miseCalls := func() string {
+		data, _ := os.ReadFile(miseLog)
+		return string(data)
+	}
+
+	runTau("allow")
+	runTau("sync")
+	if miseCalls() == "" {
+		t.Fatalf("expected mise to be invoked on the initial sync")
+	}
+
+	// Shell-only edit: change an env var, leave the tool set alone. The fast path
+	// must regenerate scripts WITHOUT touching mise.
+	if err := os.Truncate(miseLog, 0); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, repo, "workspace.tg",
+		"project(\"demo\")\nshell.env(\"SCOPE\", \"changed\")\nmise.tool(\"node@1\")\n")
+	runTau("sync", "--if-stale")
+	if c := miseCalls(); c != "" {
+		t.Errorf("shell-only edit re-invoked mise (install skipping missed):\n%s", c)
+	}
+	act, err := os.ReadFile(filepath.Join(repo, ".taugres", "gen", "activate.bash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(act), "changed") {
+		t.Errorf("scripts not regenerated with the new env value:\n%s", act)
+	}
+
+	// Sanity: changing the tool set DOES re-invoke mise (guards against
+	// over-skipping).
+	if err := os.Truncate(miseLog, 0); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, repo, "workspace.tg",
+		"project(\"demo\")\nshell.env(\"SCOPE\", \"changed\")\nmise.tool(\"node@2\")\n")
+	runTau("sync", "--if-stale")
+	if miseCalls() == "" {
+		t.Errorf("tool-set change did not re-invoke mise")
+	}
+}
+
+// TestAutosyncReinstallsOnlyChangedManager proves per-manager tracking: with
+// both a mise-provisioned toolchain and an npm package, changing only the npm
+// package reinstalls npm without re-invoking mise (its signature is unchanged,
+// so its cached store dirs are reused — no `mise where`, no install).
+func TestAutosyncReinstallsOnlyChangedManager(t *testing.T) {
+	tau := builtTau(t)
+
+	store := testutil.TempWorkspace(t)
+	testutil.WriteExec(t, store, "node/1/bin/node", "#!/bin/sh\n")
+	miseLog := filepath.Join(t.TempDir(), "mise.log")
+	npmLog := filepath.Join(t.TempDir(), "npm.log")
+
+	// Fake npm lives in the mise node bin dir (that's where the toolchain resolves
+	// it). It records calls and lays down the prefix layout tau reads back.
+	npmScript := "#!/bin/sh\n" +
+		"echo \"$@\" >> \"" + npmLog + "\"\n" +
+		"prefix=\n" +
+		"while [ $# -gt 0 ]; do [ \"$1\" = \"--prefix\" ] && { shift; prefix=\"$1\"; }; shift; done\n" +
+		"if [ -n \"$prefix\" ]; then\n" +
+		"  mkdir -p \"$prefix/bin\" \"$prefix/lib/node_modules/leftpad\"\n" +
+		"  printf '{\"version\":\"1.0.0\"}' > \"$prefix/lib/node_modules/leftpad/package.json\"\n" +
+		"fi\n"
+	testutil.WriteExec(t, store, "node/1/bin/npm", npmScript)
+
+	// Fake mise: `where` resolves node to the prebuilt store path; everything else
+	// is a no-op. Records calls so we can assert mise is untouched.
+	fakeBin := t.TempDir()
+	miseScript := "#!/bin/sh\n" +
+		"echo \"$@\" >> \"" + miseLog + "\"\n" +
+		"case \"$1\" in\n" +
+		"  where) echo \"" + store + "/node/1\" ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mise"), []byte(miseScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgHome := t.TempDir()
+	cacheHome := t.TempDir()
+	env := append(os.Environ(),
+		"XDG_CONFIG_HOME="+cfgHome,
+		"XDG_CACHE_HOME="+cacheHome,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	repo := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, repo, "workspace.tg",
+		"project(\"demo\")\nnpm.install(\"leftpad@1\")\n")
+
+	runTau := func(args ...string) {
+		t.Helper()
+		c := exec.Command(tau, args...)
+		c.Dir = repo
+		c.Env = env
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("tau %v: %v\n%s", args, err, out)
+		}
+	}
+	read := func(p string) string { b, _ := os.ReadFile(p); return string(b) }
+
+	runTau("allow")
+	runTau("sync")
+	if read(miseLog) == "" || read(npmLog) == "" {
+		t.Fatalf("initial sync should invoke both mise and npm\nmise:%q\nnpm:%q", read(miseLog), read(npmLog))
+	}
+
+	// Change only the npm package; mise (the node toolchain) is unchanged.
+	if err := os.Truncate(miseLog, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(npmLog, 0); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, repo, "workspace.tg",
+		"project(\"demo\")\nnpm.install(\"leftpad@2\")\n")
+	runTau("sync", "--if-stale")
+
+	if c := read(miseLog); c != "" {
+		t.Errorf("npm-only change re-invoked mise (per-manager tracking missed):\n%s", c)
+	}
+	if read(npmLog) == "" {
+		t.Errorf("npm-only change did not reinstall npm")
+	}
+}
+
+// TestAutosyncNoOpTouchSkipsRegeneration proves the hash confirmation: a config
+// whose mtime is bumped without any content change (an editor save, a git
+// checkout) triggers the cheap mtime check but must not regenerate scripts —
+// the thorough hash check sees no real change and re-anchors the manifest mtime.
+func TestAutosyncNoOpTouchSkipsRegeneration(t *testing.T) {
+	tau := builtTau(t)
+	cfgHome := t.TempDir()
+	cacheHome := t.TempDir()
+	env := append(os.Environ(), "XDG_CONFIG_HOME="+cfgHome, "XDG_CACHE_HOME="+cacheHome)
+
+	repo := testutil.TempWorkspace(t)
+	cfgPath := testutil.WriteFile(t, repo, "workspace.tg",
+		"project(\"demo\")\nshell.env(\"SCOPE\", \"root\")\n")
+
+	runTau := func(args ...string) {
+		t.Helper()
+		c := exec.Command(tau, args...)
+		c.Dir = repo
+		c.Env = env
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("tau %v: %v\n%s", args, err, out)
+		}
+	}
+	runTau("allow")
+	runTau("sync")
+
+	act := filepath.Join(repo, ".taugres", "gen", "activate.bash")
+	before, err := os.Stat(act)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bump the config mtime into the future without changing its content.
+	future := before.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(cfgPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	runTau("sync", "--if-stale")
+
+	after, err := os.Stat(act)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("no-op touch regenerated scripts; hash confirmation missed the early-out")
+	}
+}
 
 var (
 	tauBinOnce sync.Once

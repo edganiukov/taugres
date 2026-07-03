@@ -15,28 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/edganiukov/taugres/internal/lock"
 	"github.com/edganiukov/taugres/internal/model"
 	"github.com/edganiukov/taugres/internal/tools/toolenv"
 )
-
-// Fresh reports whether every package is already installed at its locked version
-// — the venv exists and each package's recorded spec is unchanged and resolved —
-// so Install (and its network access) can be skipped.
-func Fresh(pkgs []model.Package, venvDir string, locked map[string]lock.Entry) bool {
-	if len(pkgs) == 0 {
-		return true // nothing declared -> nothing to install
-	}
-	if !toolenv.IsDir(BinDir(venvDir)) {
-		return false
-	}
-	for _, p := range pkgs {
-		if e, ok := locked[p.Name]; !ok || e.Requested != p.Version || e.Resolved == "" {
-			return false
-		}
-	}
-	return true
-}
 
 // outputPrefix labels uv's own output so its origin is clear.
 const outputPrefix = "uv: "

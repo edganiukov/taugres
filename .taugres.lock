@@ -4,6 +4,20 @@
     "go": {
       "requested": "1.26.4",
       "resolved": "1.26.4"
+    },
+    "python": {
+      "requested": "",
+      "resolved": "3.14.6"
+    },
+    "uv": {
+      "requested": "",
+      "resolved": "0.11.26"
+    }
+  },
+  "uv": {
+    "ruff": {
+      "requested": "0.6.9",
+      "resolved": "0.6.9"
     }
   }
 }

@@ -33,6 +33,10 @@ const GenDirName = "gen"
 //	input:<sha256>:<abs-path>     a config input (config file, loaded module, fn/hook source file)
 //	tooldir:<abs-path>            a tool bin dir that must exist
 //	probe:<kind>|<arg>|<result>   an exists()/which() observation
+//	toolsig:<mgr>:<sha256>        per-manager fingerprint of its tools + locked versions
+//
+// The shell hook only reads input/tooldir/probe lines and ignores the rest, so
+// toolsig is Go-only and safe to add without touching the hook.
 const ManifestName = "manifest"
 
 // Manifest is the parsed state file.
@@ -41,10 +45,19 @@ type Manifest struct {
 	// fn/hook source files) to its content hash. A newer mtime (the cheap hook
 	// check) or a changed hash (the thorough `tau status` check) is stale.
 	Inputs map[string]string
-	// ToolDirs are bin dirs that must exist on disk; a missing one is stale.
+	// ToolDirs are bin dirs that must exist on disk; a missing one is stale. It
+	// holds the mise store bin dirs followed by each package manager's prefix bin;
+	// a shell-only resync recovers the mise subset from here (the package dirs are
+	// derivable from the plan), so no dir is recorded twice.
 	ToolDirs []string
 	// Probes are recorded exists()/which() results; a changed result is stale.
 	Probes []model.Probe
+	// ToolSig maps each tool manager (mise/pip/npm/uv) to a fingerprint of its
+	// declared tools/packages joined with their locked versions. When a manager's
+	// signature is unchanged (and its bin dirs exist) its install is skipped; when
+	// every manager is fresh, the whole install phase is skipped and only the
+	// shell scripts are regenerated. Managers with nothing declared are absent.
+	ToolSig map[string]string
 }
 
 // GenDir returns the generated directory for a project state dir
@@ -90,6 +103,18 @@ func (m *Manifest) Write(stateDir string) error {
 		b.WriteString(p.Result)
 		b.WriteByte('\n')
 	}
+	mgrs := make([]string, 0, len(m.ToolSig))
+	for mgr := range m.ToolSig {
+		mgrs = append(mgrs, mgr)
+	}
+	sort.Strings(mgrs)
+	for _, mgr := range mgrs {
+		b.WriteString("toolsig:")
+		b.WriteString(mgr)
+		b.WriteByte(':')
+		b.WriteString(m.ToolSig[mgr])
+		b.WriteByte('\n')
+	}
 	return os.WriteFile(ManifestPath(stateDir), []byte(b.String()), 0o644)
 }
 
@@ -100,7 +125,7 @@ func Load(stateDir string) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Manifest{Inputs: map[string]string{}}
+	m := &Manifest{Inputs: map[string]string{}, ToolSig: map[string]string{}}
 	for line := range strings.SplitSeq(string(data), "\n") {
 		tag, rest, ok := strings.Cut(line, ":")
 		if !ok {
@@ -113,6 +138,10 @@ func Load(stateDir string) (*Manifest, error) {
 			}
 		case "tooldir":
 			m.ToolDirs = append(m.ToolDirs, rest)
+		case "toolsig":
+			if mgr, hash, ok := strings.Cut(rest, ":"); ok {
+				m.ToolSig[mgr] = hash
+			}
 		case "probe":
 			// kind|arg|result; arg (a path) may contain '|', so take kind from
 			// the front and result from the back.
@@ -125,6 +154,15 @@ func Load(stateDir string) (*Manifest, error) {
 		}
 	}
 	return m, nil
+}
+
+// TouchManifest re-anchors the manifest's mtime to now. The cheap mtime
+// staleness check treats any input newer than the manifest as stale, so after
+// confirming (by hash) that a mtime-only change was a no-op, bumping the
+// manifest mtime stops the shell hook from re-triggering on every prompt.
+func TouchManifest(stateDir string) error {
+	now := time.Now()
+	return os.Chtimes(ManifestPath(stateDir), now, now)
 }
 
 // HashFile returns the hex sha256 of a file's contents.

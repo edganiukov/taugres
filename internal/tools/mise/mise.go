@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/edganiukov/taugres/internal/lock"
 	"github.com/edganiukov/taugres/internal/model"
 	"github.com/edganiukov/taugres/internal/tools/toolenv"
 )
@@ -108,29 +107,6 @@ type Installed struct {
 	Name     string // tool name
 	Resolved string // concrete resolved version (e.g. "22.11.0")
 	BinDir   string // directory holding its executables (for PATH)
-}
-
-// InstalledDirs returns each tool's store bin dir, in tool order, if every tool
-// is already installed at its locked version — its recorded spec matches the
-// config, it resolved to a concrete version, and that version is present in the
-// mise store. ok is false otherwise, meaning Install must run.
-//
-// Presence is resolved with `mise where` (offline, no network), so nothing
-// machine-specific is cached in the committed lock. This runs during a sync
-// (gating the network install), never on the shell hook's hot path.
-func InstalledDirs(tools []model.MiseTool, locked map[string]lock.Entry) (dirs []string, ok bool) {
-	for _, t := range tools {
-		e, present := locked[t.Name]
-		if !present || e.Requested != t.Version || e.Resolved == "" {
-			return nil, false
-		}
-		dir, err := where(model.MiseTool{Name: t.Name, Version: e.Resolved})
-		if err != nil {
-			return nil, false // recorded but not actually installed
-		}
-		dirs = append(dirs, binDir(dir, t.Name))
-	}
-	return dirs, true
 }
 
 // Install installs the given tools (each MiseTool.Version is the exact spec to

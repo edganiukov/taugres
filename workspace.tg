@@ -22,7 +22,7 @@ mise.tool("go@1.26.4")
 
 # Python packages install into a project-local venv (.taugres/tools/pip); its
 # bin is prepended to PATH. Implies mise python.
-# uv.install("ruff@0.6.9")
+uv.install("ruff@0.6.9")
 
 # Node packages install into a project-local prefix (.taugres/tools/npm); their
 # CLIs run directly (like npx). Implies mise node.

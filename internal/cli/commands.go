@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
@@ -197,6 +199,15 @@ func runSync(e *Env, args []string) int {
 		if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && !need {
 			return 0
 		}
+		// The cheap mtime trigger fires on a no-op touch too (an editor save that
+		// rewrites the file, `git checkout` bumping mtimes). Confirm with the
+		// thorough hash-based check: if nothing actually changed, just re-anchor
+		// the manifest mtime so the hook stops re-triggering, and skip the whole
+		// sync — no Starlark eval, no tool probing, no script regeneration.
+		if !state.CheckStale(stateDir, render.SupportedShells).Stale {
+			_ = state.TouchManifest(stateDir)
+			return 0
+		}
 	}
 
 	res, err := config.Evaluate(d)
@@ -232,18 +243,6 @@ func runSync(e *Env, args []string) int {
 		return fail(e, format, args...)
 	}
 
-	// Install declared tools. This may hit the network; it belongs to sync,
-	// never activation. Tool output is streamed through the reporter prefixed
-	// with the tool name ("mise: "/"pip: "/"npm: ").
-	installReport := func(name string) func(bool) {
-		rep.Step("tau: installing " + name)
-		return func(ok bool) {
-			if ok {
-				rep.Step("tau: installed " + name)
-			}
-		}
-	}
-
 	// Load the committed lockfile. Versions are pinned by default (reproducible);
 	// --update re-resolves unpinned entries. GC prunes lock entries and
 	// uninstalls packages that were removed from the config.
@@ -255,11 +254,6 @@ func runSync(e *Env, args []string) int {
 	// Tool installs are best-effort: a failure is collected but does not abort
 	// the sync, so the shell environment (env vars, PATH, aliases, functions) is
 	// always generated even if a package fails to install.
-	//
-	// mise tools are exposed the way `mise activate` does — by prepending their
-	// real install bin dirs to PATH (no symlink/wrapper farm). pip/npm then use
-	// node/python from those dirs, and install into their own project-local
-	// prefixes.
 	var toolErrs []string
 	var toolErrsMu sync.Mutex
 	addErr := func(msg string) {
@@ -267,37 +261,319 @@ func runSync(e *Env, args []string) int {
 		toolErrs = append(toolErrs, msg)
 		toolErrsMu.Unlock()
 	}
-	// Per-tool staleness: each manager installs only when its declared set
-	// changed or its artifacts are missing (or --update forces it). A sync
-	// triggered for an unrelated reason therefore does no tool work and hits no
-	// network. --update re-resolves unpinned entries, so it forces every manager.
-	// Fresh() is true for an empty set, so these read as plain "is it stale?".
-	force := *update
-	pipStale := force || !pip.Fresh(plan.PipPackages, plan.PipDir, lk.Pip)
-	npmStale := force || !npm.Fresh(plan.NpmPackages, plan.NpmDir, lk.Npm)
-	uvStale := force || !uv.Fresh(plan.UvPackages, plan.UvDir, lk.Uv)
 
-	var miseBinDirs, toolchainBinDirs, restBinDirs []string
+	// Split the sync into two concerns: installing tools (slow, may hit the
+	// network) and preparing the shell (fast, always regenerated below). A tool
+	// manager (mise/pip/npm/uv) is fresh when its signature — its declared
+	// tools/packages joined with their locked versions — is unchanged since the
+	// last sync and its bin dirs still exist; a fresh manager's install is
+	// skipped. When every manager is fresh, the whole install phase is skipped
+	// and the cached mise store bin dirs are reused for PATH without re-probing
+	// mise, so editing an env var / alias / hook never spawns a tool subprocess.
+	// --update forces a full install pass.
+	//
+	// Signatures are computed from the lock as loaded from disk, which in steady
+	// state already carries the resolved versions from the last sync.
+	sig := toolSigs(plan, lk)
+	prior, _ := state.Load(plan.StateDir)
+	fresh := freshness(prior, sig, plan, *update)
+
+	var miseBinDirs, toolDirs []string
+	if prior != nil && fresh.allFresh() {
+		// Recover the mise store bin dirs (needed for PATH) from the recorded tool
+		// dirs by dropping the package bin dirs, which are deterministic from the
+		// plan — so no dir is cached twice.
+		toolDirs = prior.ToolDirs
+		miseBinDirs = miseBinDirsFrom(toolDirs, plan)
+	} else {
+		miseBinDirs, toolDirs = installTools(plan, lk, rep, *update, addErr, fresh)
+		// Persist the lockfile (best effort; it is committed with the project).
+		if err := lk.Save(d.ProjectRoot); err != nil {
+			addErr("writing " + lock.FileName + ": " + err.Error())
+		}
+		// Recompute from the post-install lock so the stored signatures reflect the
+		// now-resolved versions; the next sync's signatures (read from the same lock
+		// on disk) then match and each manager takes the fast path.
+		sig = toolSigs(plan, lk)
+	}
+
+	// Prepend mise tool bin dirs to the activation PATH (in front of the
+	// project-local pip/npm dirs already in plan.PathPrepend).
+	plan.PathPrepend = dedupStrings(append(append([]string{}, miseBinDirs...), plan.PathPrepend...))
+
+	rep.Step("tau: generating shell scripts")
+	genDir := state.GenDir(plan.StateDir)
+	if err := os.MkdirAll(genDir, 0o755); err != nil {
+		return syncFail("creating %s: %v", genDir, err)
+	}
+
+	for _, sh := range render.SupportedShells {
+		act, err := render.Activate(plan, sh)
+		if err != nil {
+			return syncFail("rendering activate.%s: %v", sh, err)
+		}
+		deact, err := render.Deactivate(plan, sh)
+		if err != nil {
+			return syncFail("rendering deactivate.%s: %v", sh, err)
+		}
+		if err := os.WriteFile(filepath.Join(genDir, "activate."+sh), []byte(act), 0o644); err != nil {
+			return syncFail("writing activate.%s: %v", sh, err)
+		}
+		if err := os.WriteFile(filepath.Join(genDir, "deactivate."+sh), []byte(deact), 0o644); err != nil {
+			return syncFail("writing deactivate.%s: %v", sh, err)
+		}
+	}
+
+	// Write the manifest last so it is the newest file: the staleness checks
+	// treat any recorded input newer than the manifest as "changed". It records
+	// config inputs (config file, loaded modules, fn/hook source files), the tool
+	// bin dirs that must exist, and the exists()/which() probe results — so a
+	// changed input, a removed tool dir, or a flipped probe all trigger a resync.
+	m, err := buildManifest(res, toolDirs, sig)
+	if err != nil {
+		return syncFail("building manifest: %v", err)
+	}
+	if err := m.Write(plan.StateDir); err != nil {
+		return syncFail("writing manifest: %v", err)
+	}
+
+	ensureGitignore(plan.ProjectRoot)
+
+	rep.Done()
+	for _, warn := range report.Warnings {
+		fmt.Fprintf(e.Stderr, "tau: warning: %s\n", warn)
+	}
+	// Surface any tool-install failures. The env is generated regardless, so the
+	// shell still works; re-run `tau sync` to retry the failed installs.
+	for _, te := range toolErrs {
+		fmt.Fprintf(e.Stderr, "tau: %s\n", te)
+	}
+
+	// Confirm completion for a manual `tau sync`. On the hook's auto-sync
+	// (--if-stale) the activation banner is the finale instead, so stay quiet.
+	if !*ifStale {
+		if len(toolErrs) > 0 {
+			fmt.Fprintf(e.Stdout, "=^..^= tau synced %s (env only; some tools failed)\n", displayName(plan))
+		} else {
+			fmt.Fprintf(e.Stdout, "=^..^= tau synced %s\n", displayName(plan))
+		}
+	}
+	if len(toolErrs) > 0 {
+		return 1
+	}
+	return 0
+}
+
+// displayName returns the project's name, falling back to its directory name.
+func displayName(plan *model.Plan) string {
+	if plan.ProjectName != "" {
+		return plan.ProjectName
+	}
+	return filepath.Base(plan.ProjectRoot)
+}
+
+// buildManifest hashes every config input (config file, loaded modules, fn/hook
+// source files) and pairs them with the tool dirs, probe results, and the
+// per-manager tool signatures into the single manifest.
+func buildManifest(res *config.Result, toolDirs []string, toolSig map[string]string) (*state.Manifest, error) {
+	plan := res.Plan
+	inputs := map[string]string{}
+	add := func(path string) error {
+		h, err := state.HashFile(path)
+		if err != nil {
+			return err
+		}
+		inputs[path] = h
+		return nil
+	}
+	if err := add(plan.ConfigPath); err != nil {
+		return nil, err
+	}
+	for _, m := range res.LoadedModules {
+		if err := add(m); err != nil {
+			return nil, err
+		}
+	}
+	for _, f := range sourceFiles(plan) {
+		if err := add(f); err != nil {
+			return nil, err
+		}
+	}
+	return &state.Manifest{
+		Inputs:   inputs,
+		ToolDirs: toolDirs,
+		Probes:   res.Probes,
+		ToolSig:  toolSig,
+	}, nil
+}
+
+// packageBinDirs returns the pip/npm/uv bin dirs recorded in the tool-dir list —
+// one per manager that has packages. Unlike the mise store dirs (resolved via
+// `mise where`), these are deterministic from the plan, so they are not cached
+// separately: the fast path recovers the mise dirs by removing these from the
+// recorded tool dirs.
+func packageBinDirs(plan *model.Plan) []string {
+	var dirs []string
+	if len(plan.PipPackages) > 0 {
+		dirs = append(dirs, filepath.Join(plan.PipDir, "bin"))
+	}
+	if len(plan.NpmPackages) > 0 {
+		dirs = append(dirs, filepath.Join(plan.NpmDir, "bin"))
+	}
+	if len(plan.UvPackages) > 0 {
+		dirs = append(dirs, filepath.Join(plan.UvDir, "bin"))
+	}
+	return dirs
+}
+
+// miseBinDirsFrom recovers the mise store bin dirs from a recorded tool-dir list
+// by removing the deterministic package bin dirs.
+func miseBinDirsFrom(toolDirs []string, plan *model.Plan) []string {
+	pkg := map[string]bool{}
+	for _, d := range packageBinDirs(plan) {
+		pkg[d] = true
+	}
+	var out []string
+	for _, d := range toolDirs {
+		if !pkg[d] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// allExist reports whether every path is an existing directory. It gates the
+// install-skipping fast path: a wiped .taugres/tools forces a full reinstall.
+func allExist(dirs []string) bool {
+	for _, d := range dirs {
+		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
+// toolSigs fingerprints each tool manager's install-relevant state: its declared
+// tools/packages paired with their locked spec (requested + resolved). A manager
+// with nothing declared is omitted. Comparing these per-manager lets a sync
+// reinstall only the manager whose inputs changed: a changed declaration, a
+// re-pin, or a dropped lock entry (e.g. from `tau update`) flips just that
+// manager's signature. Entries are sorted so declaration order does not affect
+// the hash.
+func toolSigs(plan *model.Plan, lk *lock.File) map[string]string {
+	sigs := map[string]string{}
+	hash := func(mgr string, lines []string) {
+		if len(lines) == 0 {
+			return
+		}
+		sort.Strings(lines)
+		sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+		sigs[mgr] = hex.EncodeToString(sum[:])
+	}
+	line := func(name, ver string, sec map[string]lock.Entry) string {
+		e := sec[name]
+		return strings.Join([]string{name, ver, e.Requested, e.Resolved}, "\x1f")
+	}
+	var mise, pip, npm, uv []string
+	for _, t := range plan.MiseTools {
+		mise = append(mise, line(t.Name, t.Version, lk.Mise))
+	}
+	for _, p := range plan.PipPackages {
+		pip = append(pip, line(p.Name, p.Version, lk.Pip))
+	}
+	for _, p := range plan.NpmPackages {
+		npm = append(npm, line(p.Name, p.Version, lk.Npm))
+	}
+	for _, p := range plan.UvPackages {
+		uv = append(uv, line(p.Name, p.Version, lk.Uv))
+	}
+	hash("mise", mise)
+	hash("pip", pip)
+	hash("npm", npm)
+	hash("uv", uv)
+	return sigs
+}
+
+// toolFreshness records, for one sync, which managers are already up to date (so
+// their install is skipped) plus the mise store bin dirs cached from the last
+// sync — reused for PATH when mise is fresh, so no `mise where` probe is needed.
+type toolFreshness struct {
+	miseStale, pipStale, npmStale, uvStale bool
+	miseDirs                               []string // cached mise bin dirs, valid when !miseStale
+}
+
+// allFresh reports whether no manager needs installing, so the whole install
+// phase can be skipped and only the shell scripts regenerated.
+func (f toolFreshness) allFresh() bool {
+	return !f.miseStale && !f.pipStale && !f.npmStale && !f.uvStale
+}
+
+// freshness compares the current per-manager signatures against the last sync's
+// to decide which managers must reinstall. A manager is stale when --update is
+// set, it was added or dropped since the last sync, its signature changed, or
+// its recorded bin dirs are missing. The mise store dirs are recovered from the
+// prior manifest (so freshness needs no `mise where`).
+func freshness(prior *state.Manifest, cur map[string]string, plan *model.Plan, force bool) toolFreshness {
+	var priorSig map[string]string
+	var miseDirs []string
+	if prior != nil {
+		priorSig = prior.ToolSig
+		miseDirs = miseBinDirsFrom(prior.ToolDirs, plan)
+	}
+	// A manager is stale when it was declared before XOR now (added/dropped), or —
+	// when declared both times — --update forces it, its signature changed, or its
+	// dirs vanished. A manager declared in neither sync is fresh (nothing to do).
+	stale := func(mgr string, declared bool, dirs []string) bool {
+		_, was := priorSig[mgr]
+		if declared != was {
+			return true
+		}
+		if !declared {
+			return false
+		}
+		return force || cur[mgr] != priorSig[mgr] || !allExist(dirs)
+	}
+	return toolFreshness{
+		miseStale: stale("mise", len(plan.MiseTools) > 0, miseDirs),
+		pipStale:  stale("pip", len(plan.PipPackages) > 0, []string{filepath.Join(plan.PipDir, "bin")}),
+		npmStale:  stale("npm", len(plan.NpmPackages) > 0, []string{filepath.Join(plan.NpmDir, "bin")}),
+		uvStale:   stale("uv", len(plan.UvPackages) > 0, []string{filepath.Join(plan.UvDir, "bin")}),
+		miseDirs:  miseDirs,
+	}
+}
+
+// installTools runs the per-tool staleness + install pipeline: it installs only
+// the managers whose declared set changed (or all, when force), GCs tools
+// dropped from the config, and returns the mise store bin dirs (prepended to
+// PATH) plus the full set of tool bin dirs (recorded for staleness). Install
+// failures are reported via addErr rather than aborting, so the shell env is
+// always built. It may hit the network and belongs to sync, never activation.
+func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, force bool, addErr func(string), fresh toolFreshness) (miseBinDirs, toolDirs []string) {
+	// Tool output is streamed through the reporter prefixed with the tool name.
+	installReport := func(name string) func(bool) {
+		rep.Step("tau: installing " + name)
+		return func(ok bool) {
+			if ok {
+				rep.Step("tau: installed " + name)
+			}
+		}
+	}
+
+	var toolchainBinDirs, restBinDirs []string
 	miseReinstalled := false
 	var wg sync.WaitGroup
 
-	// mise is fresh when every declared tool is already installed at its locked
-	// version (resolved offline via `mise where`); then its store bin dirs are
-	// reused for PATH and the install is skipped.
-	var miseDirs []string
-	miseFresh := false
-	if !force && len(plan.MiseTools) > 0 && mise.Available() {
-		miseDirs, miseFresh = mise.InstalledDirs(plan.MiseTools, lk.Mise)
-	}
-
 	switch {
-	case len(plan.MiseTools) > 0 && !mise.Available():
+	case len(plan.MiseTools) == 0:
+		// Nothing declared: no store dirs on PATH (and any previously-installed
+		// tools were dropped, so gcTools prunes their lock entries below).
+	case !mise.Available():
 		addErr("mise is required to install tools but is not installed — install it with `curl https://mise.run | sh` (see https://mise.jdx.dev; the mise binary on PATH is all tau needs)")
-	case miseFresh:
-		// Present and unchanged: skip mise entirely, reuse the store bin dirs for
-		// PATH (and as the toolchain for pip/uv/npm).
-		miseBinDirs = miseDirs
-		toolchainBinDirs = miseDirs
+	case !fresh.miseStale:
+		// Unchanged: reuse the store bin dirs cached from the last sync (no
+		// `mise where`) for PATH and as the toolchain for pip/uv/npm.
+		miseBinDirs = fresh.miseDirs
+		toolchainBinDirs = fresh.miseDirs
 	default:
 		miseReinstalled = true
 		// Effective versions (locked unless --update / spec changed).
@@ -305,7 +581,7 @@ func runSync(e *Env, args []string) int {
 		reqByName := map[string]string{}
 		for i, t := range plan.MiseTools {
 			e, ok := lk.Mise[t.Name]
-			effMise[i] = model.MiseTool{Name: t.Name, Version: lock.InstallVersion(t.Version, e, ok, *update)}
+			effMise[i] = model.MiseTool{Name: t.Name, Version: lock.InstallVersion(t.Version, e, ok, force)}
 			reqByName[t.Name] = t.Version
 		}
 		// recordMise writes lock entries and returns the tools' bin dirs. Each
@@ -362,21 +638,21 @@ func runSync(e *Env, args []string) int {
 	pkgDir := func(name string) string { return filepath.Join(plan.StateDir, "tools", name) }
 	managers := []packageManager{
 		{
-			label: "pip", stale: pipStale, pkgs: plan.PipPackages, dir: pkgDir("pip"), section: lk.Pip,
+			label: "pip", stale: fresh.pipStale, pkgs: plan.PipPackages, dir: pkgDir("pip"), section: lk.Pip,
 			install: func(p []model.Package) (map[string]string, error) {
 				return pip.Install(p, pkgDir("pip"), toolchainBinDirs, rep.Stream("pip: "), installReport)
 			},
 			uninstall: func(n []string) error { return pip.Uninstall(pkgDir("pip"), n, rep.Stream("pip: ")) },
 		},
 		{
-			label: "npm", stale: npmStale, pkgs: plan.NpmPackages, dir: pkgDir("npm"), section: lk.Npm,
+			label: "npm", stale: fresh.npmStale, pkgs: plan.NpmPackages, dir: pkgDir("npm"), section: lk.Npm,
 			install: func(p []model.Package) (map[string]string, error) {
 				return npm.Install(p, pkgDir("npm"), toolchainBinDirs, rep.Stream("npm: "), installReport)
 			},
 			uninstall: func(n []string) error { return npm.Uninstall(pkgDir("npm"), n, toolchainBinDirs, rep.Stream("npm: ")) },
 		},
 		{
-			label: "uv", stale: uvStale, pkgs: plan.UvPackages, dir: pkgDir("uv"), section: lk.Uv,
+			label: "uv", stale: fresh.uvStale, pkgs: plan.UvPackages, dir: pkgDir("uv"), section: lk.Uv,
 			install: func(p []model.Package) (map[string]string, error) {
 				return uv.Install(p, pkgDir("uv"), toolchainBinDirs, rep.Stream("uv: "), installReport)
 			},
@@ -391,7 +667,7 @@ func runSync(e *Env, args []string) int {
 			continue
 		}
 		wg.Go(func() {
-			resolved, err := m.install(effectiveVersions(m.pkgs, m.section, *update))
+			resolved, err := m.install(effectiveVersions(m.pkgs, m.section, force))
 			if err != nil {
 				addErr(err.Error())
 			}
@@ -407,123 +683,12 @@ func runSync(e *Env, args []string) int {
 	// config.
 	gcTools(plan, lk, managers, rep)
 
-	// Tool bin dirs recorded for staleness: mise store bins + each package
-	// manager's prefix bin (present only when it has packages).
-	toolDirs := append([]string{}, miseBinDirs...)
-	for _, m := range managers {
-		if len(m.pkgs) > 0 {
-			toolDirs = append(toolDirs, filepath.Join(m.dir, "bin"))
-		}
-	}
-
-	// Persist the lockfile (best effort; it is committed with the project).
-	if err := lk.Save(d.ProjectRoot); err != nil {
-		toolErrs = append(toolErrs, "writing "+lock.FileName+": "+err.Error())
-	}
-
-	// Prepend mise tool bin dirs to the activation PATH (in front of the
-	// project-local pip/npm dirs already in plan.PathPrepend).
-	plan.PathPrepend = dedupStrings(append(append([]string{}, miseBinDirs...), plan.PathPrepend...))
-
-	rep.Step("tau: generating shell scripts")
-	genDir := state.GenDir(plan.StateDir)
-	if err := os.MkdirAll(genDir, 0o755); err != nil {
-		return syncFail("creating %s: %v", genDir, err)
-	}
-
-	for _, sh := range render.SupportedShells {
-		act, err := render.Activate(plan, sh)
-		if err != nil {
-			return syncFail("rendering activate.%s: %v", sh, err)
-		}
-		deact, err := render.Deactivate(plan, sh)
-		if err != nil {
-			return syncFail("rendering deactivate.%s: %v", sh, err)
-		}
-		if err := os.WriteFile(filepath.Join(genDir, "activate."+sh), []byte(act), 0o644); err != nil {
-			return syncFail("writing activate.%s: %v", sh, err)
-		}
-		if err := os.WriteFile(filepath.Join(genDir, "deactivate."+sh), []byte(deact), 0o644); err != nil {
-			return syncFail("writing deactivate.%s: %v", sh, err)
-		}
-	}
-
-	// Write the manifest last so it is the newest file: the staleness checks
-	// treat any recorded input newer than the manifest as "changed". It records
-	// config inputs (config file, loaded modules, fn/hook source files), the tool
-	// bin dirs that must exist, and the exists()/which() probe results — so a
-	// changed input, a removed tool dir, or a flipped probe all trigger a resync.
-	m, err := buildManifest(res, toolDirs)
-	if err != nil {
-		return syncFail("building manifest: %v", err)
-	}
-	if err := m.Write(plan.StateDir); err != nil {
-		return syncFail("writing manifest: %v", err)
-	}
-
-	ensureGitignore(plan.ProjectRoot)
-
-	rep.Done()
-	for _, warn := range report.Warnings {
-		fmt.Fprintf(e.Stderr, "tau: warning: %s\n", warn)
-	}
-	// Surface any tool-install failures. The env is generated regardless, so the
-	// shell still works; re-run `tau sync` to retry the failed installs.
-	for _, te := range toolErrs {
-		fmt.Fprintf(e.Stderr, "tau: %s\n", te)
-	}
-
-	// Confirm completion for a manual `tau sync`. On the hook's auto-sync
-	// (--if-stale) the activation banner is the finale instead, so stay quiet.
-	if !*ifStale {
-		if len(toolErrs) > 0 {
-			fmt.Fprintf(e.Stdout, "=^..^= tau synced %s (env only; some tools failed)\n", displayName(plan))
-		} else {
-			fmt.Fprintf(e.Stdout, "=^..^= tau synced %s\n", displayName(plan))
-		}
-	}
-	if len(toolErrs) > 0 {
-		return 1
-	}
-	return 0
-}
-
-// displayName returns the project's name, falling back to its directory name.
-func displayName(plan *model.Plan) string {
-	if plan.ProjectName != "" {
-		return plan.ProjectName
-	}
-	return filepath.Base(plan.ProjectRoot)
-}
-
-// buildManifest hashes every config input (config file, loaded modules, fn/hook
-// source files) and pairs them with the tool dirs and probe results into the
-// single manifest.
-func buildManifest(res *config.Result, toolDirs []string) (*state.Manifest, error) {
-	plan := res.Plan
-	inputs := map[string]string{}
-	add := func(path string) error {
-		h, err := state.HashFile(path)
-		if err != nil {
-			return err
-		}
-		inputs[path] = h
-		return nil
-	}
-	if err := add(plan.ConfigPath); err != nil {
-		return nil, err
-	}
-	for _, m := range res.LoadedModules {
-		if err := add(m); err != nil {
-			return nil, err
-		}
-	}
-	for _, f := range sourceFiles(plan) {
-		if err := add(f); err != nil {
-			return nil, err
-		}
-	}
-	return &state.Manifest{Inputs: inputs, ToolDirs: toolDirs, Probes: res.Probes}, nil
+	// Tool bin dirs recorded for staleness: mise store bins followed by each
+	// package manager's prefix bin (present only when it has packages). The order
+	// and derivation must match miseBinDirsFrom, which recovers the mise subset by
+	// removing the package bin dirs.
+	toolDirs = append(append([]string{}, miseBinDirs...), packageBinDirs(plan)...)
+	return miseBinDirs, toolDirs
 }
 
 // gcTools removes packages and lock entries that were dropped from the config.
