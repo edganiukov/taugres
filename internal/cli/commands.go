@@ -194,19 +194,24 @@ func runSync(e *Env, args []string) int {
 	defer unlock()
 
 	// In hook mode, re-check under the lock so we don't redo work another
-	// process just finished while we waited.
+	// process just finished while we waited. The cheap mtime check is only a
+	// trigger: timestamp granularity can miss a same-tick edit, and it does not
+	// verify generated scripts. Confirm freshness with hashes before skipping.
 	if *ifStale {
-		if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && !need {
-			return 0
-		}
-		// The cheap mtime trigger fires on a no-op touch too (an editor save that
-		// rewrites the file, `git checkout` bumping mtimes). Confirm with the
-		// thorough hash-based check: if nothing actually changed, just re-anchor
-		// the manifest mtime so the hook stops re-triggering, and skip the whole
-		// sync — no Starlark eval, no tool probing, no script regeneration.
-		if !state.CheckStale(stateDir, render.SupportedShells).Stale {
-			_ = state.TouchManifest(stateDir)
-			return 0
+		need, err := state.NeedsSync(stateDir, d.ConfigPath)
+		if err == nil {
+			// The cheap mtime trigger also fires on a no-op touch (an editor save that
+			// rewrites the file, `git checkout` bumping mtimes). If the thorough
+			// hash/script/tool check says nothing actually changed, skip the whole
+			// sync — no Starlark eval, no tool probing, no script regeneration. When
+			// the cheap check did fire, re-anchor the manifest mtime so the hook stops
+			// re-triggering on every prompt.
+			if !state.CheckStale(stateDir, render.SupportedShells).Stale {
+				if need {
+					_ = state.TouchManifest(stateDir)
+				}
+				return 0
+			}
 		}
 	}
 
