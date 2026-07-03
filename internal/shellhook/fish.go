@@ -40,14 +40,6 @@ function _tau_gen_dir
     echo "$argv[1]/.taugres/gen"
 end
 
-function _tau_config_file
-    if test -f "$argv[1]/project.tg"
-        echo "$argv[1]/project.tg"
-    else
-        echo "$argv[1]/workspace.tg"
-    end
-end
-
 function _tau_mtime
     stat -c %Y $argv[1] 2>/dev/null; or stat -f %m $argv[1] 2>/dev/null
 end
@@ -66,9 +58,9 @@ end
 
 # Runs on every directory change. The common case (nothing changed) costs only a
 # few stats and no subprocess. It shells out to \x60tau sync --if-stale\x60 only when
-# the manifest shows drift (guarded by _TAU_TRIED so a failing sync is not
-# retried until inputs change), and delegates activation to \x60tau activate\x60. It
-# never evaluates Starlark or runs package managers itself.
+# the manifest shows drift (guarded by the tau-owned gen/tried marker so a
+# failing sync is not retried until inputs change), and delegates activation to
+# \x60tau activate\x60. It never evaluates Starlark or runs package managers itself.
 function _tau_hook --on-variable PWD
     set -l proj (_tau_find_config)
 
@@ -86,6 +78,7 @@ function _tau_hook --on-variable PWD
     set -l gen_dir (_tau_gen_dir "$proj")
     set -l activate "$gen_dir/activate.fish"
     set -l manifest "$gen_dir/manifest"
+    set -l tried "$gen_dir/tried"
 
     # Cheap staleness check using only builtins (-f/-nt/-d, command -s) — no
     # subprocess on the common (unchanged) path. One pass over the single
@@ -94,6 +87,9 @@ function _tau_hook --on-variable PWD
     set -l stale
     set -l present 1
     set -l probesig ""
+    set -l retry
+    set -l have_tried
+    test -f "$tried"; and set have_tried 1
     if test ! -f "$activate"; or test ! -f "$manifest"
         set stale 1; set present 0
     end
@@ -102,8 +98,11 @@ function _tau_hook --on-variable PWD
             switch "$line"
                 case 'input:*'
                     set -l p (string replace -r '^input:[^:]*:' '' -- $line)
-                    if test -n "$p"; and test "$p" -nt "$manifest"
-                        set stale 1
+                    if test -n "$p"
+                        test "$p" -nt "$manifest"; and set stale 1
+                        if test -n "$have_tried"; and test "$p" -nt "$tried"
+                            set retry 1
+                        end
                     end
                 case 'tooldir:*'
                     set -l d (string replace -r '^tooldir:' '' -- $line)
@@ -134,41 +133,28 @@ function _tau_hook --on-variable PWD
     end
 
     if test -n "$stale"; and test -n "$_TAU_BIN"
-        # Retry token so a failing sync isn't retried until inputs change;
-        # reading mtimes runs stat, but only here on the (rare) stale path. The
-        # probe signal is folded in so a genuine probe flip forces one resync.
-        set -l newest (_tau_mtime (_tau_config_file "$proj"))
-        test -n "$newest"; or set newest 0
-        if test -f "$manifest"
-            while read -l line
-                switch "$line"
-                    case 'input:*'
-                        set -l p (string replace -r '^input:[^:]*:' '' -- $line)
-                        test -n "$p"; or continue
-                        set -l m (_tau_mtime "$p")
-                        if test -n "$m"; and test "$m" -gt "$newest"
-                            set newest $m
-                        end
-                end
-            end <"$manifest"
+        # Retry guard, owned by tau: a failed or refused sync records the attempt
+        # in gen/tried (content: the present+probe state it saw); a successful
+        # sync (or \x60tau allow\x60) removes it. Retry only when there is no record,
+        # an input is newer than it (checked in the loop above), or the recorded
+        # state drifted — so a persistently failing sync is not re-run every
+        # prompt, in any shell.
+        if test -n "$have_tried"
+            set -l seen
+            read seen < "$tried" 2>/dev/null
+            test "$seen" = "$present$probesig"; or set retry 1
+        else
+            set retry 1
         end
-        set -l _tau_tok "$proj|$present|$newest|$probesig"
-        if test "$_tau_tok" != "$_TAU_TRIED"
-            set -g _TAU_TRIED "$_tau_tok"
+        if test -n "$retry"
             # If this project is active, tear it down with the CURRENT deactivate
             # script before the sync regenerates it, so removed vars/PATH don't leak.
             test "$_TAU_ACTIVE_ROOT" = "$proj"; and _tau_teardown
-            set -l _tau_pre (_tau_mtime "$activate")
             if pushd "$proj" 2>/dev/null
                 $_TAU_BIN sync --if-stale
                 popd
             end
-            set -e _TAU_ACT_TOKEN # force (re)activation below (activate mtime is 1s-granular)
-            # Re-arm the guard only if the sync actually regenerated the env
-            # (activate mtime changed): a teardown (rm -rf .taugres) then re-syncs,
-            # but a no-op sync (e.g. an untrusted project) is not retried every prompt.
-            set -l _tau_post (_tau_mtime "$activate")
-            test -n "$_tau_post"; and test "$_tau_pre" != "$_tau_post"; and set -e _TAU_TRIED
+            set -e _TAU_ACT_TOKEN # force the (re)activation check below
         end
     end
 

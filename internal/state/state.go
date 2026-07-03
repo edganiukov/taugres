@@ -165,6 +165,63 @@ func TouchManifest(stateDir string) error {
 	return os.Chtimes(ManifestPath(stateDir), now, now)
 }
 
+// --- auto-sync retry guard ---
+
+// TriedName is the retry-guard file (gen/tried). A failed or refused auto-sync
+// records the attempt here; the shell hook then re-runs `tau sync --if-stale`
+// only when an input is newer than this file or the recorded state token
+// changed. It is shared by all shells and cleared on a successful sync (and by
+// `tau allow`, which invalidates a refused attempt).
+//
+// Content is one line — <present><probesig> — mirroring exactly what the hook
+// computes with builtins: present is "1"/"0" for "activate scripts, manifest,
+// and every tool dir exist", and probesig is "|<0/1>" per recorded probe, in
+// manifest order.
+const TriedName = "tried"
+
+// TriedPath returns the retry-guard path within a state dir.
+func TriedPath(stateDir string) string {
+	return filepath.Join(GenDir(stateDir), TriedName)
+}
+
+// WriteTried records a failed/refused auto-sync attempt for the hook's retry
+// guard, computing the state token from the last-synced manifest.
+func WriteTried(stateDir string, shells []string) error {
+	present := "1"
+	var sig strings.Builder
+	m, err := Load(stateDir)
+	if err != nil {
+		present = "0"
+	} else {
+		for _, sh := range shells {
+			if _, err := os.Stat(filepath.Join(GenDir(stateDir), "activate."+sh)); err != nil {
+				present = "0"
+				break
+			}
+		}
+		if missingDir(m.ToolDirs) != "" {
+			present = "0"
+		}
+		for _, p := range m.Probes {
+			sig.WriteString("|")
+			sig.WriteString(boolResult(probeNow(p.Kind, p.Arg)))
+		}
+	}
+	if err := os.MkdirAll(GenDir(stateDir), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(TriedPath(stateDir), []byte(present+sig.String()+"\n"), 0o644)
+}
+
+// ClearTried removes the retry guard so the hook syncs again on the next prompt.
+func ClearTried(stateDir string) error {
+	err := os.Remove(TriedPath(stateDir))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
 // HashFile returns the hex sha256 of a file's contents.
 func HashFile(path string) (string, error) {
 	f, err := os.Open(path)
@@ -208,6 +265,20 @@ func boolResult(ok bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+// probeNow returns a probe's current boolean observation — the value the shell
+// hook folds into its probe signal with `[ -e ]` / `command -v`.
+func probeNow(kind, arg string) bool {
+	switch kind {
+	case "exists":
+		_, err := os.Stat(arg)
+		return err == nil
+	case "which":
+		_, err := exec.LookPath(arg)
+		return err == nil
+	}
+	return false
 }
 
 // probeDrifted reports whether a recorded probe's result differs from the

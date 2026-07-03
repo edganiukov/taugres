@@ -303,9 +303,9 @@ On each prompt the hook:
 1. walks up to the nearest config dir (pure shell);
 2. computes a cheap staleness signal from a set of independent **checks**, using
    only shell builtins (no subprocess on the common path);
-3. if stale, runs `tau sync --if-stale` — guarded by a per-shell token
-   (`_TAU_TRIED`) so a persistently failing sync is not retried until the inputs
-   change (no re-sync storm);
+3. if stale, runs `tau sync --if-stale` — guarded by a tau-owned retry marker
+   (`.taugres/gen/tried`) so a persistently failing sync is not retried until
+   the inputs change (no re-sync storm), in any shell;
 4. (re)activates via `eval "$(tau activate <shell>)"` when entering/switching or
    when the generated env changed (tracked by `_TAU_ACT_TOKEN`).
 
@@ -336,10 +336,18 @@ tags) and drive *what work* a sync does — see Per-manager staleness.
 The manifest's own mtime is the "last synced" anchor. On each prompt the hook
 makes **one pass** over the file, dispatching by line tag with builtins only
 (`-nt`, `-d`, `command -v`); the Go evaluators (`NeedsSync`) run the same three
-dimensions **concurrently**. Only on the stale path does it read mtimes (`stat`)
-to build the `_TAU_TRIED` retry token, into which the probe signal is folded so a
-genuine change forces exactly one resync (no storm). Adding a dimension is a new
-line tag plus a case in the dispatch.
+dimensions **concurrently**. Adding a dimension is a new line tag plus a case in
+the dispatch.
+
+**Retry guard.** A failed or refused auto-sync must not be re-run on every
+prompt (it would re-evaluate Starlark and re-print its error). tau owns this
+state: it records the attempt in `.taugres/gen/tried` — one line holding the
+present+probe token it saw — and removes it on a successful sync (and on
+`tau allow`, which invalidates a refused attempt so the very next prompt syncs).
+The hook then retries only when there is no record, an input is `-nt` the
+record, or its computed token differs — all builtins, folded into the same
+single manifest pass. Because the guard is a file, it is shared by every shell:
+one failure is retried once machine-wide, not once per open shell.
 
 Because everything lives in one file written last, a failed/partial sync never
 marks the environment fresh, and a second shell entering during an in-progress

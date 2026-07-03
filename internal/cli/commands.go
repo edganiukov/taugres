@@ -160,7 +160,7 @@ func runCheck(e *Env, args []string) int {
 
 // --- sync ---
 
-func runSync(e *Env, args []string) int {
+func runSync(e *Env, args []string) (code int) {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	fs.SetOutput(e.Stderr)
 	ifStale := fs.Bool("if-stale", false, "only sync if the config changed since the last sync (used by the shell hook)")
@@ -177,6 +177,19 @@ func runSync(e *Env, args []string) int {
 	}
 	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
 
+	// Maintain the hook's retry guard (gen/tried): a failed or refused sync
+	// records the attempt so the hook does not re-run it every prompt (only when
+	// inputs change); a successful or fresh sync clears it. refused marks the
+	// untrusted --if-stale bail, which exits 0 but must still record.
+	refused := false
+	defer func() {
+		if code != 0 || refused {
+			_ = state.WriteTried(stateDir, render.SupportedShells)
+		} else {
+			_ = state.ClearTried(stateDir)
+		}
+	}()
+
 	// Trust gate first: an untrusted project can never sync (activation would
 	// source shell.fn/shell.hook files and run installs), so bail before any
 	// lock, Starlark eval, or tool work. In hook mode (--if-stale) stay silent —
@@ -187,6 +200,7 @@ func runSync(e *Env, args []string) int {
 		return fail(e, "checking trust: %v", err)
 	}
 	if !allowed {
+		refused = true
 		if *ifStale {
 			return 0
 		}
@@ -1207,6 +1221,9 @@ func runAllow(e *Env, args []string) int {
 	if err := trust.Allow(er.disc.ConfigPath); err != nil {
 		return fail(e, "recording trust: %v", err)
 	}
+	// Trusting invalidates a recorded refused-sync attempt, so the hook retries
+	// (and succeeds) on the very next prompt.
+	_ = state.ClearTried(filepath.Join(er.disc.ProjectRoot, ".taugres"))
 	fmt.Fprintf(e.Stdout, "tau: trusted %s\n", er.disc.ConfigPath)
 	return 0
 }

@@ -19,7 +19,7 @@ func TestHookContainsAutoSync(t *testing.T) {
 		"input:*",                // config inputs tracked
 		"tooldir:*",              // tool dirs tracked
 		"probe:*",                // exists()/which() probes tracked
-		"_TAU_TRIED",             // per-shell storm guard
+		`"$gen_dir/tried"`,       // tau-owned retry guard (storm protection)
 		"_TAU_ACT_TOKEN",         // re-activate when the generated env changes
 		"_tau_hook",
 		"PROMPT_COMMAND",
@@ -65,7 +65,7 @@ func TestHookFishUsesOnVariablePwd(t *testing.T) {
 		"activate fish",
 		`-nt "$manifest"`,
 		"$gen_dir/manifest",
-		"_TAU_TRIED",
+		"$gen_dir/tried",
 		"_TAU_ACT_TOKEN",
 	} {
 		if !strings.Contains(out, want) {
