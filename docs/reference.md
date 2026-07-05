@@ -91,8 +91,9 @@ if env("CI"):
 ```python
 project(name)
 
-shell.env(name, value)          # value expands $VAR/${VAR} (earlier env, then process env)
+shell.env(name, value)          # value is a string (expands $VAR/${VAR}) or a shell.exec(...) handle
 shell.dotenv(path)              # load KEY=VALUE from a .env file (//-anchored/absolute; values literal)
+shell.exec(command, dynamic=False)  # deferred command output; pass to shell.env as a value
 shell.unset(name)
 shell.alias(name, value)
 shell.path.prepend(entry)       # //-anchored or absolute
@@ -172,6 +173,36 @@ DATABASE_URL=postgres://localhost/app
 QUOTED="a b c"
 LITERAL='keep $HOME literal'
 ```
+
+### Command output (`shell.exec`)
+
+`shell.exec(command, dynamic=False)` returns a **deferred handle** for a command's
+output; assign it and pass it to `shell.env` to store the result in a variable:
+
+```python
+sha = shell.exec("git rev-parse --short HEAD")
+shell.env("GIT_SHA", sha)
+
+# or inline
+shell.env("NODE_V", shell.exec("node -v"))          # static: sees mise-provisioned node
+shell.env("STAMP", shell.exec("date +%s", dynamic = True))
+```
+
+The command runs via `sh -c` in the project root — **never during evaluation**,
+so inspecting an untrusted config (`tau check`/`status`) runs no code. When it
+runs depends on `dynamic`:
+
+- **`dynamic=False`** (default): runs once at `tau sync` (trust-gated, after tool
+  installs so provisioned tools are on PATH). The trimmed stdout is baked into the
+  activation script as a normal save/restored variable — activation stays instant.
+  The value refreshes on each sync but can go stale between syncs.
+- **`dynamic=True`**: emitted as a command substitution (`export VAR="$(cmd)"`,
+  fish `set -gx VAR (cmd)`) that runs in your shell on every activation — always
+  fresh, at the cost of a subprocess per activation event.
+
+`tau exec` has no shell, so it resolves both kinds itself before running the
+command. The handle is deferred, so it can't be used in eval-time expressions
+(`if`, string concatenation) — use `exists()`/`which()`/`env()` to branch.
 
 ### Reusable helpers
 

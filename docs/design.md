@@ -104,6 +104,16 @@ filesystem/PATH/environment but never run commands or write anything.
 `shell.dotenv(path)` likewise only *reads* a `.env` file into the plan's
 environment.
 
+Running a command is the one thing evaluation must never do — `tau
+check`/`status`/`allow` evaluate *untrusted* configs, so eval-time execution
+would let a clone run code on inspection. `shell.exec(command, dynamic=…)`
+preserves this: it records a **deferred** directive (like `mise.tool` records a
+version to resolve later) rather than executing. A static entry runs at `tau
+sync` (trust-gated, after installs) and its output is baked into the activation
+script; a dynamic entry is rendered as a command substitution that runs in the
+shell on each activation. The result feeds `shell.env`; being deferred, it can't
+be branched on at eval — that's what the probes are for.
+
 All shell-facing configuration is grouped under the `shell` namespace; external
 tool managers keep their own namespaces. The full API surface, path-anchoring
 rules, reusable-helper pattern, and the built-in `TAUGRES_*` variables live in
@@ -432,9 +442,7 @@ aren't known at eval), so they don't appear in the eval-time `pathPrepend`.
 
 ## Roadmap
 
-- **Frozen ecosystem-dependency installs** (`npm ci`, `uv sync --frozen`, …) and
-  hashing those lockfiles in `.taugres.lock` for real supply-chain integrity;
-  more language managers (Bundler, Cargo, Go modules, Composer).
+- **tau build <binary>**: option to build binaries from local code.
 - **Remote (`https://`) Starlark imports**, with content pinned by sha256 in the
   lock (portable, tamper-evident) and cache-first fetching.
 - **`tau doctor`** — host requirement checks (mise/python/node presence).
@@ -453,9 +461,5 @@ aren't known at eval), so they don't appear in the eval-time `pathPrepend`.
 
 ## Open questions
 
-1. Should trust move from allow-once (path-based) toward direnv-style
-   content-based re-approval, or stay convenient?
-2. Should `render` + `shellhook` consolidate into a single `internal/shell/`
-   package (shared shell list + quoting)?
-3. When remote imports land, is cache-first + lock-pinned the right default, and
+1. When remote imports land, is cache-first + lock-pinned the right default, and
    should uncached remote imports fetch during `tau check`/`allow` or only sync?

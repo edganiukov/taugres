@@ -341,6 +341,48 @@ func TestDotenvMissingFileErrors(t *testing.T) {
 	}
 }
 
+func TestExecEnv(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+sha = shell.exec("echo abc123")
+shell.env("GIT_SHA", sha)
+shell.env("NOW", shell.exec("date", dynamic = True))
+`)
+	p := evalWorkspace(t, dir).Plan
+	if len(p.ExecEnv) != 2 {
+		t.Fatalf("ExecEnv = %+v", p.ExecEnv)
+	}
+	if got := p.ExecEnv[0]; got.Name != "GIT_SHA" || got.Command != "echo abc123" || got.Dynamic {
+		t.Errorf("static exec = %+v", got)
+	}
+	if got := p.ExecEnv[1]; got.Name != "NOW" || got.Command != "date" || !got.Dynamic {
+		t.Errorf("dynamic exec = %+v", got)
+	}
+	// The command must NOT run during evaluation, so no value is baked into EnvSet.
+	if _, ok := p.EnvSet["GIT_SHA"]; ok {
+		t.Errorf("shell.exec must not run at eval; EnvSet baked GIT_SHA=%q", p.EnvSet["GIT_SHA"])
+	}
+}
+
+func TestExecEmptyCommandErrors(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nshell.env(\"X\", shell.exec(\"   \"))\n")
+	d, _ := discover.Discover(dir)
+	if _, err := Evaluate(d); err == nil {
+		t.Error("expected error for empty shell.exec command")
+	}
+}
+
+func TestEnvRejectsNonStringValue(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nshell.env(\"X\", 42)\n")
+	d, _ := discover.Discover(dir)
+	if _, err := Evaluate(d); err == nil {
+		t.Error("expected error for non-string/non-exec shell.env value")
+	}
+}
+
 func TestMiseJobs(t *testing.T) {
 	dir := testutil.TempWorkspace(t)
 	// Default is defaultMiseJobs when mise.jobs is not called.

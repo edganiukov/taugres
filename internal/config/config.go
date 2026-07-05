@@ -75,6 +75,7 @@ type builder struct {
 
 	envSet   map[string]string
 	envUnset []string
+	execEnv  []model.ExecEnv
 
 	pathPrepend []string
 	pathAppend  []string
@@ -139,6 +140,7 @@ func (b *builder) predeclared() starlark.StringDict {
 		"fn":     b.builtin("shell.fn", b.fnSourceFn),
 		"hook":   b.builtin("shell.hook", b.hookFn),
 		"dotenv": b.builtin("shell.dotenv", b.dotenvFn),
+		"exec":   b.builtin("shell.exec", b.execFn),
 	})
 
 	miseModule := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
@@ -318,14 +320,61 @@ func boolResult(ok bool) string {
 }
 
 func (b *builder) envFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var name, value string
+	var name string
+	var value starlark.Value
 	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "name", &name, "value", &value); err != nil {
 		return nil, err
 	}
-	// Expand $VAR / ${VAR} references, preferring vars set earlier in this
-	// config, then the process environment.
-	b.envSet[name] = os.Expand(value, b.envLookup)
+	switch v := value.(type) {
+	case starlark.String:
+		// Expand $VAR / ${VAR} references, preferring vars set earlier in this
+		// config, then the process environment.
+		b.envSet[name] = os.Expand(string(v), b.envLookup)
+	case execValue:
+		// Deferred command output: resolved at sync (static) or activation
+		// (dynamic), never during evaluation.
+		b.execEnv = append(b.execEnv, model.ExecEnv{Name: name, Command: v.command, Dynamic: v.dynamic})
+	default:
+		return nil, fmt.Errorf("%s: value must be a string or shell.exec(...), got %s", fn.Name(), value.Type())
+	}
 	return starlark.None, nil
+}
+
+// execValue is the deferred handle returned by shell.exec(...). It carries the
+// command to run and whether it is dynamic, but never runs it — evaluation stays
+// side-effect free. shell.env consumes it; using it anywhere else errors.
+type execValue struct {
+	command string
+	dynamic bool
+}
+
+var _ starlark.Value = execValue{}
+
+func (e execValue) String() string {
+	return fmt.Sprintf("shell.exec(%q, dynamic=%t)", e.command, e.dynamic)
+}
+func (e execValue) Type() string          { return "shell.exec" }
+func (e execValue) Freeze()               {}
+func (e execValue) Truth() starlark.Bool  { return starlark.True }
+func (e execValue) Hash() (uint32, error) { return 0, fmt.Errorf("shell.exec value is unhashable") }
+
+// execFn implements shell.exec(command, dynamic=False): return a deferred handle
+// for a command whose stdout becomes an environment value via shell.env. The
+// command runs at sync time (dynamic=False, baked static into the activation
+// script) or in the shell on each activation (dynamic=True) — never during
+// evaluation, so inspecting an untrusted config never runs code. Because the
+// value is deferred it cannot be branched on at eval; use exists()/which()/env()
+// for that.
+func (b *builder) execFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var command string
+	var dynamic bool
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "command", &command, "dynamic?", &dynamic); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(command) == "" {
+		return nil, fmt.Errorf("%s: command must not be empty", fn.Name())
+	}
+	return execValue{command: command, dynamic: dynamic}, nil
 }
 
 // envLookup resolves a variable name for os.Expand: earlier env() values win
@@ -600,6 +649,7 @@ func (b *builder) finalize() (*model.Plan, error) {
 
 	p.EnvSet = b.envSet
 	p.EnvUnset = b.envUnset
+	p.ExecEnv = b.execEnv
 	p.Aliases = b.aliases
 	p.SourceFuncs = b.sourceFuncs
 	p.Hooks = b.hooks

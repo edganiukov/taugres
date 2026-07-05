@@ -28,6 +28,21 @@ type HookScript struct {
 	Content string   `json:"content,omitempty"`
 }
 
+// ExecEnv is an environment variable whose value is the output of a shell
+// command, declared with shell.env(name, shell.exec(command, dynamic=…)).
+//
+// The command never runs during config evaluation (that would let an untrusted
+// config run code on inspection). A static entry (Dynamic=false) runs once at
+// sync time — trust-gated, after tool installs, so provisioned tools are on
+// PATH — and its trimmed stdout is baked into the activation script as a normal
+// (save/restored) variable. A dynamic entry (Dynamic=true) is emitted as a
+// command substitution that runs in the shell on every activation.
+type ExecEnv struct {
+	Name    string `json:"name"`
+	Command string `json:"command"`
+	Dynamic bool   `json:"dynamic,omitempty"`
+}
+
 // MiseTool is a tool/runtime to be installed via mise, declared with
 // mise.tool(name, version). An empty Version means "latest".
 type MiseTool struct {
@@ -89,6 +104,11 @@ type Plan struct {
 	// Environment.
 	EnvSet   map[string]string `json:"envSet"`
 	EnvUnset []string          `json:"envUnset"`
+
+	// ExecEnv are variables whose value comes from a shell command. Static
+	// entries are resolved into EnvSet at sync time; dynamic entries are rendered
+	// as command substitutions in the activation script.
+	ExecEnv []ExecEnv `json:"execEnv,omitempty"`
 
 	// PATH modifications, in user-specified order (post-dedup).
 	PathPrepend []string `json:"pathPrepend"`

@@ -10,7 +10,7 @@ shell.env("FOO", "BAR")
 # shell.path.prepend("//bin")
 
 # Aliases.
-# shell.alias("l", "ls")
+shell.alias("ll", "ls -lah")
 
 # Shell functions: inline content, or a file via file="//bin/fn.sh".
 # shell.fn("hi", shells = ["bash", "zsh"], content = "echo hello $1")

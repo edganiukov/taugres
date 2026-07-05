@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -319,6 +320,27 @@ func runSync(e *Env, args []string) int {
 	// Prepend mise tool bin dirs to the activation PATH (in front of the
 	// project-local pip/npm dirs already in plan.PathPrepend).
 	plan.PathPrepend = dedupStrings(append(append([]string{}, miseBinDirs...), plan.PathPrepend...))
+
+	// Resolve static shell.exec(...) env vars now: sync is trust-gated and the
+	// tools are on PATH, so run each command and bake its trimmed output into
+	// EnvSet before rendering. Later commands see earlier ones. Failures are
+	// reported (best-effort) but never abort the sync; dynamic entries run in the
+	// shell at activation, so they are skipped here.
+	if hasStaticExec(plan.ExecEnv) {
+		m := projectEnvMap(plan, nil) // mise dirs already merged into plan.PathPrepend
+		for _, ex := range plan.ExecEnv {
+			if ex.Dynamic {
+				continue
+			}
+			out, cerr := captureCommand(ex.Command, plan.ProjectRoot, flattenEnv(m))
+			if cerr != nil {
+				addErr("shell.exec " + ex.Name + " failed: " + cerr.Error())
+				continue
+			}
+			plan.EnvSet[ex.Name] = out
+			m[ex.Name] = out
+		}
+	}
 
 	rep.Step("tau: generating shell scripts")
 	genDir := state.GenDir(plan.StateDir)
@@ -1099,7 +1121,20 @@ func runExec(e *Env, args []string) int {
 		miseBinDirs = miseBinDirsFrom(m.ToolDirs, plan)
 	}
 
-	env := projectEnviron(plan, miseBinDirs)
+	// Resolve shell.exec(...) env vars: exec has no shell, so run both static and
+	// dynamic commands now against the assembled env (later ones see earlier ones).
+	// A failure is reported but does not block the command.
+	envMap := projectEnvMap(plan, miseBinDirs)
+	for _, ex := range plan.ExecEnv {
+		out, cerr := captureCommand(ex.Command, plan.ProjectRoot, flattenEnv(envMap))
+		if cerr != nil {
+			fmt.Fprintf(e.Stderr, "tau: shell.exec %s: %v\n", ex.Name, cerr)
+			continue
+		}
+		envMap[ex.Name] = out
+	}
+	env := flattenEnv(envMap)
+
 	bin, err := lookPathIn(rest[0], env)
 	if err != nil {
 		return fail(e, "%v", err)
@@ -1121,12 +1156,14 @@ func runExec(e *Env, args []string) int {
 	return 0
 }
 
-// projectEnviron builds the process environment for `tau exec`: the ambient
-// environment with the plan's env set/unset applied, the Taugres built-in
-// variables, and PATH prefixed by the tool bin dirs plus shell.path.prepend
-// entries (appends going after). It mirrors what an activation exports, minus
-// shell-only features. mise store bin dirs (known only after sync) are passed in.
-func projectEnviron(plan *model.Plan, miseBinDirs []string) []string {
+// projectEnvMap builds the resolved environment for `tau exec` as a map: the
+// ambient environment with the plan's env set/unset applied, the Taugres
+// built-in variables, and PATH prefixed by the tool bin dirs plus
+// shell.path.prepend entries (appends going after). It mirrors what an
+// activation exports, minus shell-only features and shell.exec vars (resolved by
+// the caller). mise store bin dirs (known only after sync) are prepended ahead of
+// plan.PathPrepend; pass nil when they are already merged into it.
+func projectEnvMap(plan *model.Plan, miseBinDirs []string) map[string]string {
 	env := map[string]string{}
 	for _, kv := range os.Environ() {
 		if k, v, ok := strings.Cut(kv, "="); ok {
@@ -1163,13 +1200,45 @@ func projectEnviron(plan *model.Plan, miseBinDirs []string) []string {
 		}
 	}
 	env["PATH"] = path
+	return env
+}
 
+// flattenEnv renders an env map as a sorted "KEY=VALUE" slice for exec.Cmd.
+func flattenEnv(env map[string]string) []string {
 	out := make([]string, 0, len(env))
 	for k, v := range env {
 		out = append(out, k+"="+v)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// hasStaticExec reports whether any exec-env entry is static (resolved at sync).
+func hasStaticExec(execs []model.ExecEnv) bool {
+	for _, ex := range execs {
+		if !ex.Dynamic {
+			return true
+		}
+	}
+	return false
+}
+
+// captureCommand runs `sh -c command` in dir with env and returns its stdout with
+// trailing newlines trimmed (like shell command substitution). Backs shell.exec.
+func captureCommand(command, dir string, env []string) (string, error) {
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Dir = dir
+	cmd.Env = env
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(errb.String()); msg != "" {
+			return "", fmt.Errorf("%w: %s", err, msg)
+		}
+		return "", err
+	}
+	return strings.TrimRight(out.String(), "\r\n"), nil
 }
 
 // lookPathIn resolves cmd against the PATH carried in env (not the parent

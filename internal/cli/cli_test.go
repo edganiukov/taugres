@@ -129,6 +129,42 @@ shell.path.prepend("//bin")
 	}
 }
 
+func TestExecEnvStaticAndDynamic(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+shell.env("STATIC", shell.exec("echo baked"))
+shell.env("DYN", shell.exec("echo live", dynamic = True))
+`)
+	run(t, dir, "allow")
+	if code, _, errOut := run(t, dir, "sync"); code != 0 {
+		t.Fatalf("sync failed: %s", errOut)
+	}
+
+	// Static exec is baked into the activation script; dynamic is a command
+	// substitution that runs in the shell on activation.
+	act, err := os.ReadFile(filepath.Join(dir, ".taugres", "gen", "activate.bash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(act); !strings.Contains(s, "export STATIC='baked'") {
+		t.Errorf("static exec not baked into activate script:\n%s", s)
+	}
+	if s := string(act); !strings.Contains(s, `export DYN="$(echo live)"`) {
+		t.Errorf("dynamic exec not rendered as substitution:\n%s", s)
+	}
+
+	// tau exec has no shell, so it resolves both static and dynamic vars itself.
+	code, out, errOut := run(t, dir, "exec", "--", "sh", "-c", "echo S=$STATIC D=$DYN")
+	if code != 0 {
+		t.Fatalf("exec failed: %s", errOut)
+	}
+	if !strings.Contains(out, "S=baked") || !strings.Contains(out, "D=live") {
+		t.Errorf("exec did not resolve exec-env vars: %q", out)
+	}
+}
+
 func TestExecPropagatesExitCode(t *testing.T) {
 	isolate(t)
 	dir := testutil.TempWorkspace(t)

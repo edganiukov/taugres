@@ -27,6 +27,7 @@ func fishActivate(p *model.Plan) string {
 	fmt.Fprintln(w)
 
 	fishEnv(w, p)
+	fishExecEnv(w, p)
 	fishPath(w, p)
 	fishAliases(w, p)
 	fishFunctions(w, p)
@@ -101,6 +102,23 @@ func fishEnv(w *strings.Builder, p *model.Plan) {
 	for _, name := range p.EnvUnset {
 		fishSaveEnv(w, name)
 		fmt.Fprintf(w, "set -e %s\n", name)
+	}
+	fmt.Fprintln(w)
+}
+
+// fishExecEnv emits dynamic shell.exec(...) env vars for fish: the command runs
+// in the shell on each activation via command substitution `(cmd)`, with the
+// prior value saved for restoration. Static entries were resolved into EnvSet at
+// sync time.
+func fishExecEnv(w *strings.Builder, p *model.Plan) {
+	execs := dynamicExecEnv(p)
+	if len(execs) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "# --- exec env (dynamic) ---")
+	for _, ex := range execs {
+		fishSaveEnv(w, ex.Name)
+		fmt.Fprintf(w, "set -gx %s (%s)\n", ex.Name, ex.Command)
 	}
 	fmt.Fprintln(w)
 }

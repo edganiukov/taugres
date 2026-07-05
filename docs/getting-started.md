@@ -55,6 +55,10 @@ project("my-app")
 shell.env("DATABASE_URL", "postgres://localhost/app")
 shell.unset("PYTHONPATH")
 
+# Store a command's output in a variable. Runs at sync (baked, default) or, with
+# dynamic=True, in the shell on each activation. Never runs during evaluation.
+shell.env("GIT_SHA", shell.exec("git rev-parse --short HEAD"))
+
 # Load KEY=VALUE pairs from a .env file (values literal, no $ expansion).
 shell.dotenv("//.env")
 
@@ -78,7 +82,7 @@ if platform.os == "linux":
 
 All shell-facing configuration lives under the `shell` namespace (`shell.env`,
 `shell.unset`, `shell.alias`, `shell.path.prepend/append`, `shell.fn`,
-`shell.hook`); tool managers keep their own (`mise.tool`, `pip.install`,
+`shell.hook`, `shell.dotenv`, `shell.exec`); tool managers keep their own (`mise.tool`, `pip.install`,
 `uv.install`, `npm.install`). Expose project commands by adding their directory
 to `PATH` explicitly, e.g. `shell.path.prepend("//bin")`. Reusable helpers can be
 loaded: `load("//taugres/lib/node.tg", "node_project")`.

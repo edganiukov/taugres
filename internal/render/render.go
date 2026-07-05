@@ -67,6 +67,9 @@ func posixActivate(p *model.Plan, shell string) string {
 	// Environment set/unset with save-for-restore.
 	renderEnv(w, p)
 
+	// Dynamic shell.exec(...) vars (command substitution at activation).
+	renderExecEnv(w, p)
+
 	// PATH.
 	renderPath(w, p)
 
@@ -193,6 +196,34 @@ func saveEnv(w *strings.Builder, name string) {
 	fmt.Fprintf(w, "  if [ -n \"${%s+x}\" ]; then %s=\"${%s}\"; %s=1; else %s=0; fi\n",
 		name, saveVar, name, presentVar, presentVar)
 	fmt.Fprintln(w, "fi")
+}
+
+// renderExecEnv emits dynamic shell.exec(...) env vars (bash/zsh): the command
+// runs in the shell on each activation via command substitution, with the prior
+// value saved for restoration. Static exec entries were resolved into EnvSet at
+// sync time, so they render as plain env vars, not here.
+func renderExecEnv(w *strings.Builder, p *model.Plan) {
+	execs := dynamicExecEnv(p)
+	if len(execs) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "# --- exec env (dynamic) ---")
+	for _, ex := range execs {
+		saveEnv(w, ex.Name)
+		fmt.Fprintf(w, "export %s=\"$(%s)\"\n", ex.Name, ex.Command)
+	}
+	fmt.Fprintln(w)
+}
+
+// dynamicExecEnv returns the plan's dynamic exec-env entries in declaration order.
+func dynamicExecEnv(p *model.Plan) []model.ExecEnv {
+	var out []model.ExecEnv
+	for _, ex := range p.ExecEnv {
+		if ex.Dynamic {
+			out = append(out, ex)
+		}
+	}
+	return out
 }
 
 func renderPath(w *strings.Builder, p *model.Plan) {
@@ -331,6 +362,10 @@ func envRestoreOrder(p *model.Plan) []string {
 	}
 	for _, n := range p.EnvUnset {
 		add(n)
+	}
+	// Dynamic exec vars are set at activation, so restore them too.
+	for _, ex := range dynamicExecEnv(p) {
+		add(ex.Name)
 	}
 	sort.Strings(out)
 	return out
