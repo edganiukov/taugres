@@ -38,22 +38,23 @@ const workspaceTemplate = `# Taugres workspace config. Language: Starlark + Taug
 project("%s")
 
 # Environment variables.
-# shell.env("DATABASE_URL", "postgres://localhost/app")
+# shell.env("FOO", "BAR")
 
 # Tools/packages install via mise/pip/npm and are added to PATH automatically
-# on activation (their real bin dirs are prepended, like mise activate). Each
-# takes a name, a "name@version" spec, or a list of specs.
+# on activation (their real bin dirs are prepended, like mise activate).
+# Each takes a name, a "name@version" spec, or a list of specs.
 # mise.tool(["node@22.11.0", "ripgrep"])   # also mise backends: go:/cargo:/npm:/ubi:/aqua:
+
+# pip/uv/npm run on a mise-provided python/node (added implicitly at latest).
+# To pin that runtime, declare it: mise.tool("python@3.12.7"), mise.tool("node@22.11.0").
 # pip.install(["ruff@0.6.9", "rich"])      # or uv.install([...]) (faster)
 # npm.install("typescript")
-# pip/uv/npm run on a mise-provided python/node (added implicitly at latest).
-# To pin that runtime, declare it: mise.tool("python@3.12.7")/mise.tool("node@22.11.0").
 
 # Paths are repository-root anchored with //.
 # shell.path.prepend("//node_modules/.bin")
 
 # Aliases.
-# shell.alias("ll", "ls -lah")
+# shell.alias("ll", "ls -lh")
 
 # Sourced shell functions. The body can live in a file...
 # shell.fn("croot", shells = ["bash", "zsh"], file = "//bin/croot.sh")

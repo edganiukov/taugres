@@ -103,8 +103,9 @@ shell.hook(shells=[...], content=... | file=...)       # raw activation snippet
 # Tools/packages: a "name@version" spec (bare name = latest) or a list of them.
 # "@" is the uniform pin separator (translated to pip's "==" internally); the
 # last "@" wins so npm scoped names stay intact.
-mise.tool("go@1.26.2")   | mise.tool(["go@1.26.2", "python"])
-mise.jobs(n)             # cap mise install parallelism (default 16)
+mise.tool("go@1.26.2") | mise.tool(["go@1.26.2", "python"])
+# cap mise install parallelism (default 16)
+mise.jobs(n)
 pip.install("ruff@0.6.9") | pip.install(["ruff@0.6.9", "rich"])   # Python via pip
 uv.install("ruff@0.6.9")  | uv.install(["ruff@0.6.9", "rich"])    # Python via uv (faster)
 npm.install("typescript") | npm.install(["typescript@5.6.2", "@scope/x@1"])
@@ -119,9 +120,6 @@ env("CI", "")                   # value of a process env var, or the default whe
 load("//taugres/lib/x.tg", "sym")   # root-anchored
 load("./lib/x.tg", "sym")           # relative to the importing file
 ```
-
-There is intentionally **no `bin()` builtin and no automatic `bin/`**: expose
-project commands explicitly with `shell.path.prepend("//bin")`.
 
 ### Pinning the pip/npm/uv runtime
 
