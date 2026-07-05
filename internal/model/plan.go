@@ -37,10 +37,15 @@ type HookScript struct {
 // PATH — and its trimmed stdout is baked into the activation script as a normal
 // (save/restored) variable. A dynamic entry (Dynamic=true) is emitted as a
 // command substitution that runs in the shell on every activation.
+// Shell names the interpreter the command runs under. Empty means "local": the
+// user's $SHELL (falling back to sh) for static/tau-exec resolution, and the
+// activating shell for a dynamic entry. A non-empty value (e.g. "bash") runs the
+// command via `<shell> -c`.
 type ExecEnv struct {
 	Name    string `json:"name"`
 	Command string `json:"command"`
 	Dynamic bool   `json:"dynamic,omitempty"`
+	Shell   string `json:"shell,omitempty"`
 }
 
 // MiseTool is a tool/runtime to be installed via mise, declared with

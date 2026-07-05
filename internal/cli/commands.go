@@ -332,7 +332,7 @@ func runSync(e *Env, args []string) int {
 			if ex.Dynamic {
 				continue
 			}
-			out, cerr := captureCommand(ex.Command, plan.ProjectRoot, flattenEnv(m))
+			out, cerr := captureCommand(ex.Shell, ex.Command, plan.ProjectRoot, flattenEnv(m))
 			if cerr != nil {
 				addErr("shell.exec " + ex.Name + " failed: " + cerr.Error())
 				continue
@@ -1126,7 +1126,7 @@ func runExec(e *Env, args []string) int {
 	// A failure is reported but does not block the command.
 	envMap := projectEnvMap(plan, miseBinDirs)
 	for _, ex := range plan.ExecEnv {
-		out, cerr := captureCommand(ex.Command, plan.ProjectRoot, flattenEnv(envMap))
+		out, cerr := captureCommand(ex.Shell, ex.Command, plan.ProjectRoot, flattenEnv(envMap))
 		if cerr != nil {
 			fmt.Fprintf(e.Stderr, "tau: shell.exec %s: %v\n", ex.Name, cerr)
 			continue
@@ -1223,10 +1223,23 @@ func hasStaticExec(execs []model.ExecEnv) bool {
 	return false
 }
 
-// captureCommand runs `sh -c command` in dir with env and returns its stdout with
-// trailing newlines trimmed (like shell command substitution). Backs shell.exec.
-func captureCommand(command, dir string, env []string) (string, error) {
-	cmd := exec.Command("sh", "-c", command)
+// resolveShell picks the interpreter for a shell.exec command: the explicit
+// shell if given, else the local login shell ($SHELL), else sh.
+func resolveShell(shell string) string {
+	if shell != "" {
+		return shell
+	}
+	if s := os.Getenv("SHELL"); s != "" {
+		return s
+	}
+	return "sh"
+}
+
+// captureCommand runs `<shell> -c command` in dir with env and returns its stdout
+// with trailing newlines trimmed (like shell command substitution). shell is the
+// interpreter name ("" resolves to the local $SHELL, else sh). Backs shell.exec.
+func captureCommand(shell, command, dir string, env []string) (string, error) {
+	cmd := exec.Command(resolveShell(shell), "-c", command)
 	cmd.Dir = dir
 	cmd.Env = env
 	var out, errb bytes.Buffer

@@ -333,7 +333,7 @@ func (b *builder) envFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.
 	case execValue:
 		// Deferred command output: resolved at sync (static) or activation
 		// (dynamic), never during evaluation.
-		b.execEnv = append(b.execEnv, model.ExecEnv{Name: name, Command: v.command, Dynamic: v.dynamic})
+		b.execEnv = append(b.execEnv, model.ExecEnv{Name: name, Command: v.command, Dynamic: v.dynamic, Shell: v.shell})
 	default:
 		return nil, fmt.Errorf("%s: value must be a string or shell.exec(...), got %s", fn.Name(), value.Type())
 	}
@@ -346,6 +346,7 @@ func (b *builder) envFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.
 type execValue struct {
 	command string
 	dynamic bool
+	shell   string
 }
 
 var _ starlark.Value = execValue{}
@@ -358,23 +359,27 @@ func (e execValue) Freeze()               {}
 func (e execValue) Truth() starlark.Bool  { return starlark.True }
 func (e execValue) Hash() (uint32, error) { return 0, fmt.Errorf("shell.exec value is unhashable") }
 
-// execFn implements shell.exec(command, dynamic=False): return a deferred handle
-// for a command whose stdout becomes an environment value via shell.env. The
-// command runs at sync time (dynamic=False, baked static into the activation
-// script) or in the shell on each activation (dynamic=True) — never during
-// evaluation, so inspecting an untrusted config never runs code. Because the
-// value is deferred it cannot be branched on at eval; use exists()/which()/env()
-// for that.
+// execFn implements shell.exec(command, dynamic=False, shell=""): return a
+// deferred handle for a command whose stdout becomes an environment value via
+// shell.env. The command runs at sync time (dynamic=False, baked static into the
+// activation script) or in the shell on each activation (dynamic=True) — never
+// during evaluation, so inspecting an untrusted config never runs code. Because
+// the value is deferred it cannot be branched on at eval; use
+// exists()/which()/env() for that.
+//
+// shell picks the interpreter: "" (default) means the local shell ($SHELL, else
+// sh) for static resolution and the activating shell for a dynamic entry; a
+// value like "bash" runs the command via `<shell> -c`.
 func (b *builder) execFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var command string
+	var command, shell string
 	var dynamic bool
-	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "command", &command, "dynamic?", &dynamic); err != nil {
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "command", &command, "dynamic?", &dynamic, "shell?", &shell); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("%s: command must not be empty", fn.Name())
 	}
-	return execValue{command: command, dynamic: dynamic}, nil
+	return execValue{command: command, dynamic: dynamic, shell: shell}, nil
 }
 
 // envLookup resolves a variable name for os.Expand: earlier env() values win

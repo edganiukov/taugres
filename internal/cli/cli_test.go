@@ -165,6 +165,28 @@ shell.env("DYN", shell.exec("echo live", dynamic = True))
 	}
 }
 
+func TestExecShellOverride(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+shell.env("DYN", shell.exec("echo hi", dynamic = True, shell = "bash"))
+`)
+	run(t, dir, "allow")
+	if code, _, errOut := run(t, dir, "sync"); code != 0 {
+		t.Fatalf("sync failed: %s", errOut)
+	}
+	// A dynamic entry with shell="bash" is wrapped so it runs under bash, not the
+	// activating shell.
+	act, err := os.ReadFile(filepath.Join(dir, ".taugres", "gen", "activate.bash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(act); !strings.Contains(s, `export DYN="$(bash -c 'echo hi')"`) {
+		t.Errorf("dynamic shell override not rendered:\n%s", s)
+	}
+}
+
 func TestExecPropagatesExitCode(t *testing.T) {
 	isolate(t)
 	dir := testutil.TempWorkspace(t)

@@ -93,7 +93,7 @@ project(name)
 
 shell.env(name, value)          # value is a string (expands $VAR/${VAR}) or a shell.exec(...) handle
 shell.dotenv(path)              # load KEY=VALUE from a .env file (//-anchored/absolute; values literal)
-shell.exec(command, dynamic=False)  # deferred command output; pass to shell.env as a value
+shell.exec(command, dynamic=False, shell="")  # deferred command output; pass to shell.env (shell="" = local $SHELL)
 shell.unset(name)
 shell.alias(name, value)
 shell.path.prepend(entry)       # //-anchored or absolute
@@ -176,8 +176,9 @@ LITERAL='keep $HOME literal'
 
 ### Command output (`shell.exec`)
 
-`shell.exec(command, dynamic=False)` returns a **deferred handle** for a command's
-output; assign it and pass it to `shell.env` to store the result in a variable:
+`shell.exec(command, dynamic=False, shell="")` returns a **deferred handle** for a
+command's output; assign it and pass it to `shell.env` to store the result in a
+variable:
 
 ```python
 sha = shell.exec("git rev-parse --short HEAD")
@@ -186,11 +187,12 @@ shell.env("GIT_SHA", sha)
 # or inline
 shell.env("NODE_V", shell.exec("node -v"))          # static: sees mise-provisioned node
 shell.env("STAMP", shell.exec("date +%s", dynamic = True))
+shell.env("OK", shell.exec("[[ -f go.mod ]] && echo yes", shell = "bash"))  # needs bash
 ```
 
-The command runs via `sh -c` in the project root — **never during evaluation**,
-so inspecting an untrusted config (`tau check`/`status`) runs no code. When it
-runs depends on `dynamic`:
+The command runs in the project root — **never during evaluation**, so inspecting
+an untrusted config (`tau check`/`status`) runs no code. When it runs depends on
+`dynamic`:
 
 - **`dynamic=False`** (default): runs once at `tau sync` (trust-gated, after tool
   installs so provisioned tools are on PATH). The trimmed stdout is baked into the
@@ -200,9 +202,14 @@ runs depends on `dynamic`:
   fish `set -gx VAR (cmd)`) that runs in your shell on every activation — always
   fresh, at the cost of a subprocess per activation event.
 
+`shell` picks the interpreter. The default (`""`) is **local**: the user's
+`$SHELL` (falling back to `sh`) for static/`tau exec` resolution, and the
+activating shell for a dynamic entry. A value like `"bash"` runs the command via
+`<shell> -c` — use it when the one-liner needs non-POSIX syntax.
+
 `tau exec` has no shell, so it resolves both kinds itself before running the
 command. The handle is deferred, so it can't be used in eval-time expressions
-(`if`, string concatenation) — use `exists()`/`which()`/`env()` to branch.
+(`if`, `==`, string concatenation) — use `exists()`/`which()`/`env()` to branch.
 
 ### Reusable helpers
 

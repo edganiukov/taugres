@@ -210,7 +210,12 @@ func renderExecEnv(w *strings.Builder, p *model.Plan) {
 	fmt.Fprintln(w, "# --- exec env (dynamic) ---")
 	for _, ex := range execs {
 		saveEnv(w, ex.Name)
-		fmt.Fprintf(w, "export %s=\"$(%s)\"\n", ex.Name, ex.Command)
+		sub := ex.Command
+		if ex.Shell != "" {
+			// Run under the requested interpreter instead of the activating shell.
+			sub = ex.Shell + " -c " + shellQuote(ex.Command)
+		}
+		fmt.Fprintf(w, "export %s=\"$(%s)\"\n", ex.Name, sub)
 	}
 	fmt.Fprintln(w)
 }

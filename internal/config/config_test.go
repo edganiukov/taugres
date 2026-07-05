@@ -383,6 +383,29 @@ func TestEnvRejectsNonStringValue(t *testing.T) {
 	}
 }
 
+func TestExecShellOption(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+shell.env("A", shell.exec("echo a", shell = "bash"))
+shell.env("B", shell.exec("echo b", dynamic = True, shell = "bash"))
+shell.env("C", shell.exec("echo c"))
+`)
+	p := evalWorkspace(t, dir).Plan
+	if len(p.ExecEnv) != 3 {
+		t.Fatalf("ExecEnv = %+v", p.ExecEnv)
+	}
+	if p.ExecEnv[0].Shell != "bash" {
+		t.Errorf("A shell = %q, want bash", p.ExecEnv[0].Shell)
+	}
+	if p.ExecEnv[1].Shell != "bash" || !p.ExecEnv[1].Dynamic {
+		t.Errorf("B = %+v, want shell=bash dynamic=true", p.ExecEnv[1])
+	}
+	if p.ExecEnv[2].Shell != "" {
+		t.Errorf("C shell = %q, want empty (local default)", p.ExecEnv[2].Shell)
+	}
+}
+
 func TestMiseJobs(t *testing.T) {
 	dir := testutil.TempWorkspace(t)
 	// Default is defaultMiseJobs when mise.jobs is not called.
