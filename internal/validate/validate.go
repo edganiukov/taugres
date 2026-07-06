@@ -65,6 +65,25 @@ func Validate(p *model.Plan) *Report {
 		}
 	}
 
+	// Deferred env vars: a valid name, and any mise.where segment must reference a
+	// declared mise tool.
+	if len(p.DeferredEnv) > 0 {
+		declared := make(map[string]bool, len(p.MiseTools))
+		for _, t := range p.MiseTools {
+			declared[t.Name] = true
+		}
+		for _, de := range p.DeferredEnv {
+			if !envNameRe.MatchString(de.Name) {
+				r.Errors = append(r.Errors, fmt.Sprintf("invalid environment variable name: %q", de.Name))
+			}
+			for _, s := range de.Segments {
+				if s.Kind == model.SegWhere && !declared[s.Value] {
+					r.Errors = append(r.Errors, fmt.Sprintf("mise.where(%q): %q is not a declared mise tool (add mise.tool(%q))", s.Value, s.Value, s.Value))
+				}
+			}
+		}
+	}
+
 	// Pip packages: names must be non-empty and free of whitespace.
 	for _, pkg := range p.PipPackages {
 		if strings.TrimSpace(pkg.Name) == "" {

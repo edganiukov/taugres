@@ -187,6 +187,28 @@ shell.env("DYN", shell.exec("echo hi", dynamic = True, shell = "bash"))
 	}
 }
 
+func TestDeferredComposedRender(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+shell.env("MIX", "pre-" + shell.exec("echo x", dynamic = True) + "-post")
+`)
+	run(t, dir, "allow")
+	if code, _, errOut := run(t, dir, "sync"); code != 0 {
+		t.Fatalf("sync failed: %s", errOut)
+	}
+	// A value mixing literals with a dynamic exec renders as one double-quoted
+	// string with the literals baked and the command as $(...).
+	act, err := os.ReadFile(filepath.Join(dir, ".taugres", "gen", "activate.bash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(act); !strings.Contains(s, `export MIX="pre-$(echo x)-post"`) {
+		t.Errorf("composed dynamic value not rendered:\n%s", s)
+	}
+}
+
 func TestExecPropagatesExitCode(t *testing.T) {
 	isolate(t)
 	dir := testutil.TempWorkspace(t)

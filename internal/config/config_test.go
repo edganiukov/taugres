@@ -350,14 +350,19 @@ shell.env("GIT_SHA", sha)
 shell.env("NOW", shell.exec("date", dynamic = True))
 `)
 	p := evalWorkspace(t, dir).Plan
-	if len(p.ExecEnv) != 2 {
-		t.Fatalf("ExecEnv = %+v", p.ExecEnv)
+	if len(p.DeferredEnv) != 2 {
+		t.Fatalf("DeferredEnv = %+v", p.DeferredEnv)
 	}
-	if got := p.ExecEnv[0]; got.Name != "GIT_SHA" || got.Command != "echo abc123" || got.Dynamic {
-		t.Errorf("static exec = %+v", got)
+	git := p.DeferredEnv[0]
+	if git.Name != "GIT_SHA" || len(git.Segments) != 1 {
+		t.Fatalf("GIT_SHA = %+v", git)
 	}
-	if got := p.ExecEnv[1]; got.Name != "NOW" || got.Command != "date" || !got.Dynamic {
-		t.Errorf("dynamic exec = %+v", got)
+	if s := git.Segments[0]; s.Kind != model.SegExec || s.Value != "echo abc123" || s.Dynamic {
+		t.Errorf("static exec segment = %+v", s)
+	}
+	now := p.DeferredEnv[1]
+	if s := now.Segments[0]; now.Name != "NOW" || s.Value != "date" || !s.Dynamic {
+		t.Errorf("dynamic exec = %+v / %+v", now, s)
 	}
 	// The command must NOT run during evaluation, so no value is baked into EnvSet.
 	if _, ok := p.EnvSet["GIT_SHA"]; ok {
@@ -392,17 +397,90 @@ shell.env("B", shell.exec("echo b", dynamic = True, shell = "bash"))
 shell.env("C", shell.exec("echo c"))
 `)
 	p := evalWorkspace(t, dir).Plan
-	if len(p.ExecEnv) != 3 {
-		t.Fatalf("ExecEnv = %+v", p.ExecEnv)
+	if len(p.DeferredEnv) != 3 {
+		t.Fatalf("DeferredEnv = %+v", p.DeferredEnv)
 	}
-	if p.ExecEnv[0].Shell != "bash" {
-		t.Errorf("A shell = %q, want bash", p.ExecEnv[0].Shell)
+	if s := p.DeferredEnv[0].Segments[0]; s.Shell != "bash" {
+		t.Errorf("A shell = %q, want bash", s.Shell)
 	}
-	if p.ExecEnv[1].Shell != "bash" || !p.ExecEnv[1].Dynamic {
-		t.Errorf("B = %+v, want shell=bash dynamic=true", p.ExecEnv[1])
+	if s := p.DeferredEnv[1].Segments[0]; s.Shell != "bash" || !s.Dynamic {
+		t.Errorf("B = %+v, want shell=bash dynamic=true", s)
 	}
-	if p.ExecEnv[2].Shell != "" {
-		t.Errorf("C shell = %q, want empty (local default)", p.ExecEnv[2].Shell)
+	if s := p.DeferredEnv[2].Segments[0]; s.Shell != "" {
+		t.Errorf("C shell = %q, want empty (local default)", s.Shell)
+	}
+}
+
+func TestMiseWhere(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+mise.tool("node@22.11.0")
+shell.env("NODE_BIN", mise.where("node"))
+`)
+	p := evalWorkspace(t, dir).Plan
+	if len(p.DeferredEnv) != 1 || p.DeferredEnv[0].Name != "NODE_BIN" {
+		t.Fatalf("DeferredEnv = %+v", p.DeferredEnv)
+	}
+	segs := p.DeferredEnv[0].Segments
+	if len(segs) != 1 || segs[0].Kind != model.SegWhere || segs[0].Value != "node" {
+		t.Errorf("segments = %+v", segs)
+	}
+	// Deferred: not resolved (no mise call) during evaluation.
+	if _, ok := p.EnvSet["NODE_BIN"]; ok {
+		t.Errorf("mise.where must not resolve at eval; EnvSet baked NODE_BIN=%q", p.EnvSet["NODE_BIN"])
+	}
+}
+
+func TestMiseWhereSuffix(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+mise.tool("go")
+shell.env("GO", mise.where("go") + "/go")
+`)
+	p := evalWorkspace(t, dir).Plan
+	if len(p.DeferredEnv) != 1 {
+		t.Fatalf("DeferredEnv = %+v", p.DeferredEnv)
+	}
+	// `+` composes into two segments: the where, then the literal suffix.
+	segs := p.DeferredEnv[0].Segments
+	if len(segs) != 2 {
+		t.Fatalf("segments = %+v", segs)
+	}
+	if segs[0].Kind != model.SegWhere || segs[0].Value != "go" {
+		t.Errorf("segment 0 = %+v, want where(go)", segs[0])
+	}
+	if segs[1].Kind != model.SegLiteral || segs[1].Value != "/go" {
+		t.Errorf("segment 1 = %+v, want literal(/go)", segs[1])
+	}
+}
+
+func TestDeferredCompose(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+mise.tool("go")
+shell.env("MIX", "pre-" + shell.exec("echo x") + "-post")
+shell.env("COMBO", mise.where("go") + ":" + shell.exec("id -un"))
+`)
+	p := evalWorkspace(t, dir).Plan
+	if len(p.DeferredEnv) != 2 {
+		t.Fatalf("DeferredEnv = %+v", p.DeferredEnv)
+	}
+	mix := p.DeferredEnv[0].Segments
+	if len(mix) != 3 ||
+		mix[0].Kind != model.SegLiteral || mix[0].Value != "pre-" ||
+		mix[1].Kind != model.SegExec || mix[1].Value != "echo x" ||
+		mix[2].Kind != model.SegLiteral || mix[2].Value != "-post" {
+		t.Errorf("MIX segments = %+v", mix)
+	}
+	combo := p.DeferredEnv[1].Segments
+	if len(combo) != 3 ||
+		combo[0].Kind != model.SegWhere || combo[0].Value != "go" ||
+		combo[1].Kind != model.SegLiteral || combo[1].Value != ":" ||
+		combo[2].Kind != model.SegExec || combo[2].Value != "id -un" {
+		t.Errorf("COMBO segments = %+v", combo)
 	}
 }
 

@@ -106,24 +106,34 @@ func fishEnv(w *strings.Builder, p *model.Plan) {
 	fmt.Fprintln(w)
 }
 
-// fishExecEnv emits dynamic shell.exec(...) env vars for fish: the command runs
-// in the shell on each activation via command substitution `(cmd)`, with the
-// prior value saved for restoration. Static entries were resolved into EnvSet at
-// sync time.
+// fishExecEnv emits dynamic deferred env vars for fish: those with a dynamic
+// shell.exec segment, run in the shell on each activation via `(cmd)`, with the
+// prior value saved for restoration. The value concatenates its segments —
+// single-quoted literals (static parts already baked at sync) and `(cmd)`
+// substitutions — which fish joins with no separator. Fully-static deferred vars
+// were baked into EnvSet.
 func fishExecEnv(w *strings.Builder, p *model.Plan) {
-	execs := dynamicExecEnv(p)
-	if len(execs) == 0 {
+	entries := dynamicDeferredEnv(p)
+	if len(entries) == 0 {
 		return
 	}
 	fmt.Fprintln(w, "# --- exec env (dynamic) ---")
-	for _, ex := range execs {
-		fishSaveEnv(w, ex.Name)
-		sub := ex.Command
-		if ex.Shell != "" {
-			// Run under the requested interpreter instead of the activating shell.
-			sub = ex.Shell + " -c " + fishQuote(ex.Command)
+	for _, de := range entries {
+		fishSaveEnv(w, de.Name)
+		var b strings.Builder
+		for _, s := range de.Segments {
+			switch s.Kind {
+			case model.SegExec: // dynamic (static execs were baked to literals at sync)
+				cmd := s.Value
+				if s.Shell != "" {
+					cmd = s.Shell + " -c " + fishQuote(s.Value)
+				}
+				fmt.Fprintf(&b, "(%s)", cmd)
+			default: // literal
+				b.WriteString(fishQuote(s.Value))
+			}
 		}
-		fmt.Fprintf(w, "set -gx %s (%s)\n", ex.Name, sub)
+		fmt.Fprintf(w, "set -gx %s %s\n", de.Name, b.String())
 	}
 	fmt.Fprintln(w)
 }

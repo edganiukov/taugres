@@ -107,6 +107,7 @@ shell.hook(shells=[...], content=... | file=...)       # raw activation snippet
 mise.tool("go@1.26.2") | mise.tool(["go@1.26.2", "python"])
 # cap mise install parallelism (default 16)
 mise.jobs(n)
+mise.where("node")         # deferred: a declared mise tool's bin dir; pass to shell.env
 pip.install("ruff@0.6.9") | pip.install(["ruff@0.6.9", "rich"])   # Python via pip
 uv.install("ruff@0.6.9")  | uv.install(["ruff@0.6.9", "rich"])    # Python via uv (faster)
 npm.install("typescript") | npm.install(["typescript@5.6.2", "@scope/x@1"])
@@ -141,6 +142,27 @@ mise.tool("uv@0.4.20")       # uv itself
 ```
 
 `tau status` lists the effective runtimes (implicit or pinned).
+
+### A tool's bin dir (`mise.where`)
+
+`mise.where(name)` returns a **deferred handle** for the directory where mise
+installed a tool — the same dir tau prepends to PATH. Pass it to `shell.env`:
+
+```python
+mise.tool("node@22.11.0")
+shell.env("NODE_BIN", mise.where("node"))          # -> .../installs/node/22.11.0/bin
+shell.env("GO_EXE", mise.where("go") + "/go")      # append a subpath with +
+```
+
+It's a deferred value like `shell.exec`, so compose it with `+` (see below) —
+e.g. append a subpath as above.
+
+The versioned store path isn't known at evaluation, so it's resolved at sync (via
+`mise where`) and baked into the activation script. The tool must be a **declared**
+mise tool (implicit runtimes count); referencing an undeclared one is a `tau
+check` error. (For most tools this is the `bin/` dir; for archive-backend tools
+whose binary name differs from the tool name it may be the install dir — it always
+matches what tau puts on PATH.)
 
 `shell.hook` bodies run at activation *after* env/PATH/aliases/functions, in
 declaration order, inside the trust gate; they are not undone on deactivation
@@ -208,8 +230,20 @@ activating shell for a dynamic entry. A value like `"bash"` runs the command via
 `<shell> -c` — use it when the one-liner needs non-POSIX syntax.
 
 `tau exec` has no shell, so it resolves both kinds itself before running the
-command. The handle is deferred, so it can't be used in eval-time expressions
-(`if`, `==`, string concatenation) — use `exists()`/`which()`/`env()` to branch.
+command.
+
+**Deferred values compose with `+`.** `shell.exec(...)` and `mise.where(...)`
+return the same kind of *deferred value*; `+` joins them with strings and with
+each other (a literal join, so include separators), and the result is another
+deferred value you pass to `shell.env`:
+
+```python
+shell.env("PROMPT", "[" + shell.exec("git branch --show-current") + "]")
+shell.env("TOOLS", mise.where("go") + ":" + mise.where("node"))
+```
+
+A deferred value still can't be **branched on** at eval (`if`, `==`) — it has no
+value yet; use `exists()`/`which()`/`env()` for that.
 
 ### Reusable helpers
 

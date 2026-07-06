@@ -89,6 +89,21 @@ func binDir(install, name string) string {
 	return install
 }
 
+// ToolBinDir returns the directory holding a tool's executables — the same dir
+// Install prepends to PATH — resolved via `mise where`. version is the concrete
+// version to look up (a locked/resolved version, a pin, or "" for the active
+// one). It runs mise, so it belongs to sync, never activation.
+func ToolBinDir(name, version string) (string, error) {
+	if !Available() {
+		return "", fmt.Errorf("mise.where(%q) needs mise — install it with `curl https://mise.run | sh` (https://mise.jdx.dev)", name)
+	}
+	dir, err := where(model.MiseTool{Name: name, Version: version})
+	if err != nil {
+		return "", err
+	}
+	return binDir(dir, name), nil
+}
+
 // where returns the install directory for a tool via `mise where`.
 func where(t model.MiseTool) (string, error) {
 	out, err := exec.Command(Binary, "where", ref(t)).Output()

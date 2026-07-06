@@ -28,24 +28,48 @@ type HookScript struct {
 	Content string   `json:"content,omitempty"`
 }
 
-// ExecEnv is an environment variable whose value is the output of a shell
-// command, declared with shell.env(name, shell.exec(command, dynamic=…)).
+// Segment kinds for a DeferredEnv value.
+const (
+	SegLiteral = "literal" // a plain string
+	SegExec    = "exec"    // a command whose stdout is captured (shell.exec)
+	SegWhere   = "where"   // a mise tool's bin dir (mise.where)
+)
+
+// Segment is one piece of a DeferredEnv value. Kind selects the meaning of the
+// other fields: a literal (Value is the text), an exec (Value is the command,
+// with Shell/Dynamic), or a where (Value is the mise tool name). A value like
+// mise.where("go") + "/x" becomes [where "go", literal "/x"].
+type Segment struct {
+	Kind    string `json:"kind"`
+	Value   string `json:"value"`             // literal text | exec command | mise tool name
+	Shell   string `json:"shell,omitempty"`   // exec: interpreter ("" = local $SHELL, else sh)
+	Dynamic bool   `json:"dynamic,omitempty"` // exec: run at activation instead of sync
+}
+
+// DeferredEnv is an environment variable whose value is resolved after config
+// evaluation, declared with shell.env(name, <deferred>) where the deferred value
+// comes from shell.exec(...) / mise.where(...) (composed with +). No segment runs
+// during evaluation (that would let an untrusted config run code on inspection).
 //
-// The command never runs during config evaluation (that would let an untrusted
-// config run code on inspection). A static entry (Dynamic=false) runs once at
-// sync time — trust-gated, after tool installs, so provisioned tools are on
-// PATH — and its trimmed stdout is baked into the activation script as a normal
-// (save/restored) variable. A dynamic entry (Dynamic=true) is emitted as a
-// command substitution that runs in the shell on every activation.
-// Shell names the interpreter the command runs under. Empty means "local": the
-// user's $SHELL (falling back to sh) for static/tau-exec resolution, and the
-// activating shell for a dynamic entry. A non-empty value (e.g. "bash") runs the
-// command via `<shell> -c`.
-type ExecEnv struct {
-	Name    string `json:"name"`
-	Command string `json:"command"`
-	Dynamic bool   `json:"dynamic,omitempty"`
-	Shell   string `json:"shell,omitempty"`
+// A fully-static value (no dynamic exec) is resolved at sync — trust-gated, after
+// tool installs, so provisioned tools are on PATH — and baked into the activation
+// script as a normal (save/restored) variable. A value with a dynamic exec is
+// rendered as a shell string mixing baked literals and `$(cmd)` substitutions
+// that run on every activation.
+type DeferredEnv struct {
+	Name     string    `json:"name"`
+	Segments []Segment `json:"segments"`
+}
+
+// IsDynamic reports whether any segment must run in the shell at activation (a
+// dynamic exec), which means the value is rendered rather than baked into EnvSet.
+func (d DeferredEnv) IsDynamic() bool {
+	for _, s := range d.Segments {
+		if s.Kind == SegExec && s.Dynamic {
+			return true
+		}
+	}
+	return false
 }
 
 // MiseTool is a tool/runtime to be installed via mise, declared with
@@ -110,10 +134,10 @@ type Plan struct {
 	EnvSet   map[string]string `json:"envSet"`
 	EnvUnset []string          `json:"envUnset"`
 
-	// ExecEnv are variables whose value comes from a shell command. Static
-	// entries are resolved into EnvSet at sync time; dynamic entries are rendered
-	// as command substitutions in the activation script.
-	ExecEnv []ExecEnv `json:"execEnv,omitempty"`
+	// DeferredEnv are variables resolved after evaluation (shell.exec/mise.where,
+	// composed with +). Fully-static ones are baked into EnvSet at sync; ones with
+	// a dynamic exec are rendered as command substitutions in the activation script.
+	DeferredEnv []DeferredEnv `json:"deferredEnv,omitempty"`
 
 	// PATH modifications, in user-specified order (post-dedup).
 	PathPrepend []string `json:"pathPrepend"`

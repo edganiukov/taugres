@@ -321,26 +321,12 @@ func runSync(e *Env, args []string) int {
 	// project-local pip/npm dirs already in plan.PathPrepend).
 	plan.PathPrepend = dedupStrings(append(append([]string{}, miseBinDirs...), plan.PathPrepend...))
 
-	// Resolve static shell.exec(...) env vars now: sync is trust-gated and the
-	// tools are on PATH, so run each command and bake its trimmed output into
-	// EnvSet before rendering. Later commands see earlier ones. Failures are
-	// reported (best-effort) but never abort the sync; dynamic entries run in the
-	// shell at activation, so they are skipped here.
-	if hasStaticExec(plan.ExecEnv) {
-		m := projectEnvMap(plan, nil) // mise dirs already merged into plan.PathPrepend
-		for _, ex := range plan.ExecEnv {
-			if ex.Dynamic {
-				continue
-			}
-			out, cerr := captureCommand(ex.Shell, ex.Command, plan.ProjectRoot, flattenEnv(m))
-			if cerr != nil {
-				addErr("shell.exec " + ex.Name + " failed: " + cerr.Error())
-				continue
-			}
-			plan.EnvSet[ex.Name] = out
-			m[ex.Name] = out
-		}
-	}
+	// Resolve deferred env vars (shell.exec / mise.where). Sync is trust-gated and
+	// tools are on PATH, so fully-static values are run/looked-up now and baked
+	// into EnvSet; values with a dynamic exec have their static segments baked in
+	// place and are rendered as command substitutions at activation. Best-effort:
+	// a failure is reported but never aborts the sync.
+	resolveDeferredEnvForSync(plan, lk, addErr)
 
 	rep.Step("tau: generating shell scripts")
 	genDir := state.GenDir(plan.StateDir)
@@ -1121,17 +1107,22 @@ func runExec(e *Env, args []string) int {
 		miseBinDirs = miseBinDirsFrom(m.ToolDirs, plan)
 	}
 
-	// Resolve shell.exec(...) env vars: exec has no shell, so run both static and
-	// dynamic commands now against the assembled env (later ones see earlier ones).
-	// A failure is reported but does not block the command.
 	envMap := projectEnvMap(plan, miseBinDirs)
-	for _, ex := range plan.ExecEnv {
-		out, cerr := captureCommand(ex.Shell, ex.Command, plan.ProjectRoot, flattenEnv(envMap))
-		if cerr != nil {
-			fmt.Fprintf(e.Stderr, "tau: shell.exec %s: %v\n", ex.Name, cerr)
-			continue
+
+	// Resolve every deferred env var (shell.exec / mise.where) into the child env.
+	// exec has no shell, so both static and dynamic segments run now, against the
+	// assembled env (later entries see earlier ones). Failures are reported but
+	// don't block the command.
+	if len(plan.DeferredEnv) > 0 {
+		lk, _ := lock.Load(d.ProjectRoot)
+		for _, de := range plan.DeferredEnv {
+			val, derr := resolveDeferred(de.Segments, lk, plan, flattenEnv(envMap))
+			if derr != nil {
+				fmt.Fprintf(e.Stderr, "tau: shell.env %s: %v\n", de.Name, derr)
+				continue
+			}
+			envMap[de.Name] = val
 		}
-		envMap[ex.Name] = out
 	}
 	env := flattenEnv(envMap)
 
@@ -1213,14 +1204,85 @@ func flattenEnv(env map[string]string) []string {
 	return out
 }
 
-// hasStaticExec reports whether any exec-env entry is static (resolved at sync).
-func hasStaticExec(execs []model.ExecEnv) bool {
-	for _, ex := range execs {
-		if !ex.Dynamic {
-			return true
+// resolveDeferredEnvForSync resolves each plan.DeferredEnv at sync time. A
+// fully-static value (no dynamic exec) is joined and written to EnvSet, so it
+// activates instantly; a value with a dynamic exec has its static segments baked
+// to literals in place and is left for the renderer to emit as `$(cmd)`. Failures
+// are reported via onErr (best-effort), never fatal. Each entry runs against the
+// current env (including EnvSet updated by earlier static entries).
+func resolveDeferredEnvForSync(plan *model.Plan, lk *lock.File, onErr func(string)) {
+	for i := range plan.DeferredEnv {
+		de := &plan.DeferredEnv[i]
+		if de.IsDynamic() {
+			// Bake the static segments (mise.where, static exec) to literals; leave
+			// dynamic exec segments for the renderer.
+			for j := range de.Segments {
+				s := &de.Segments[j]
+				if s.Kind == model.SegExec && s.Dynamic {
+					continue
+				}
+				val, err := resolveSegment(*s, lk, plan, flattenEnv(projectEnvMap(plan, nil)))
+				if err != nil {
+					onErr("shell.env " + de.Name + ": " + err.Error())
+					continue
+				}
+				*s = model.Segment{Kind: model.SegLiteral, Value: val}
+			}
+			continue
+		}
+		val, err := resolveDeferred(de.Segments, lk, plan, flattenEnv(projectEnvMap(plan, nil)))
+		if err != nil {
+			onErr("shell.env " + de.Name + ": " + err.Error())
+			continue
+		}
+		plan.EnvSet[de.Name] = val
+	}
+}
+
+// resolveDeferred resolves every segment (including dynamic exec) and joins them.
+// Used by `tau exec`, which has no shell to defer to.
+func resolveDeferred(segs []model.Segment, lk *lock.File, plan *model.Plan, env []string) (string, error) {
+	var b strings.Builder
+	for _, s := range segs {
+		val, err := resolveSegment(s, lk, plan, env)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(val)
+	}
+	return b.String(), nil
+}
+
+// resolveSegment resolves a single segment to its string value: a literal as-is,
+// a mise.where to the tool's bin dir (looked up via the locked version so it
+// matches PATH), or an exec to its command's trimmed stdout.
+func resolveSegment(s model.Segment, lk *lock.File, plan *model.Plan, env []string) (string, error) {
+	switch s.Kind {
+	case model.SegLiteral:
+		return s.Value, nil
+	case model.SegWhere:
+		return mise.ToolBinDir(s.Value, miseVersion(s.Value, lk, plan))
+	case model.SegExec:
+		return captureCommand(s.Shell, s.Value, plan.ProjectRoot, env)
+	default:
+		return "", fmt.Errorf("unknown segment kind %q", s.Kind)
+	}
+}
+
+// miseVersion returns the concrete version to look up for a mise tool: the locked
+// resolved version if present, else the version declared in the config.
+func miseVersion(tool string, lk *lock.File, plan *model.Plan) string {
+	if lk != nil {
+		if v := lk.Mise[tool].Resolved; v != "" {
+			return v
 		}
 	}
-	return false
+	for _, t := range plan.MiseTools {
+		if t.Name == tool {
+			return t.Version
+		}
+	}
+	return ""
 }
 
 // resolveShell picks the interpreter for a shell.exec command: the explicit

@@ -198,34 +198,59 @@ func saveEnv(w *strings.Builder, name string) {
 	fmt.Fprintln(w, "fi")
 }
 
-// renderExecEnv emits dynamic shell.exec(...) env vars (bash/zsh): the command
-// runs in the shell on each activation via command substitution, with the prior
-// value saved for restoration. Static exec entries were resolved into EnvSet at
-// sync time, so they render as plain env vars, not here.
+// renderExecEnv emits dynamic deferred env vars (bash/zsh): those with a dynamic
+// shell.exec segment, which runs in the shell on each activation via command
+// substitution, with the prior value saved for restoration. The value is built
+// from its segments — literals (their static mise.where/exec parts already baked
+// at sync) inside the double-quoted value, dynamic exec parts as `$(cmd)`.
+// Fully-static deferred vars were baked into EnvSet, so they render as plain vars.
 func renderExecEnv(w *strings.Builder, p *model.Plan) {
-	execs := dynamicExecEnv(p)
-	if len(execs) == 0 {
+	entries := dynamicDeferredEnv(p)
+	if len(entries) == 0 {
 		return
 	}
 	fmt.Fprintln(w, "# --- exec env (dynamic) ---")
-	for _, ex := range execs {
-		saveEnv(w, ex.Name)
-		sub := ex.Command
-		if ex.Shell != "" {
-			// Run under the requested interpreter instead of the activating shell.
-			sub = ex.Shell + " -c " + shellQuote(ex.Command)
-		}
-		fmt.Fprintf(w, "export %s=\"$(%s)\"\n", ex.Name, sub)
+	for _, de := range entries {
+		saveEnv(w, de.Name)
+		fmt.Fprintf(w, "export %s=\"%s\"\n", de.Name, posixDeferredValue(de))
 	}
 	fmt.Fprintln(w)
 }
 
-// dynamicExecEnv returns the plan's dynamic exec-env entries in declaration order.
-func dynamicExecEnv(p *model.Plan) []model.ExecEnv {
-	var out []model.ExecEnv
-	for _, ex := range p.ExecEnv {
-		if ex.Dynamic {
-			out = append(out, ex)
+// posixDeferredValue renders a dynamic deferred value as the inside of a bash/zsh
+// double-quoted string: literal segments are escaped for that context, dynamic
+// exec segments become `$(cmd)` (or `$(<shell> -c '...')`).
+func posixDeferredValue(de model.DeferredEnv) string {
+	var b strings.Builder
+	for _, s := range de.Segments {
+		switch s.Kind {
+		case model.SegExec: // dynamic (static execs were baked to literals at sync)
+			cmd := s.Value
+			if s.Shell != "" {
+				cmd = s.Shell + " -c " + shellQuote(s.Value)
+			}
+			fmt.Fprintf(&b, "$(%s)", cmd)
+		default: // literal
+			b.WriteString(dquoteEscape(s.Value))
+		}
+	}
+	return b.String()
+}
+
+// dquoteEscape escapes a literal for a bash/zsh double-quoted context, where
+// \ " $ ` are special.
+func dquoteEscape(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
+	return r.Replace(s)
+}
+
+// dynamicDeferredEnv returns the plan's deferred env vars that need shell-side
+// evaluation (a dynamic exec segment), in declaration order.
+func dynamicDeferredEnv(p *model.Plan) []model.DeferredEnv {
+	var out []model.DeferredEnv
+	for _, de := range p.DeferredEnv {
+		if de.IsDynamic() {
+			out = append(out, de)
 		}
 	}
 	return out
@@ -368,9 +393,9 @@ func envRestoreOrder(p *model.Plan) []string {
 	for _, n := range p.EnvUnset {
 		add(n)
 	}
-	// Dynamic exec vars are set at activation, so restore them too.
-	for _, ex := range dynamicExecEnv(p) {
-		add(ex.Name)
+	// Dynamic deferred vars are set at activation, so restore them too.
+	for _, de := range dynamicDeferredEnv(p) {
+		add(de.Name)
 	}
 	sort.Strings(out)
 	return out

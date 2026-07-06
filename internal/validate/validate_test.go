@@ -27,6 +27,27 @@ func TestSetAndUnsetConflict(t *testing.T) {
 	}
 }
 
+func TestMiseWhereMustBeDeclared(t *testing.T) {
+	where := func(name, tool string) model.DeferredEnv {
+		return model.DeferredEnv{Name: name, Segments: []model.Segment{{Kind: model.SegWhere, Value: tool}}}
+	}
+
+	// Referencing a declared mise tool is fine.
+	ok := model.NewPlan()
+	ok.MiseTools = []model.MiseTool{{Name: "node"}}
+	ok.DeferredEnv = []model.DeferredEnv{where("NODE_BIN", "node")}
+	if r := Validate(ok); r.HasErrors() {
+		t.Errorf("declared tool should validate: %v", r.Errors)
+	}
+
+	// Referencing an undeclared tool is an error.
+	bad := model.NewPlan()
+	bad.DeferredEnv = []model.DeferredEnv{where("NODE_BIN", "node")}
+	if r := Validate(bad); !hasErrContaining(r, "not a declared mise tool") {
+		t.Errorf("expected undeclared-tool error, got %v", r.Errors)
+	}
+}
+
 func TestMissingSourceFile(t *testing.T) {
 	p := model.NewPlan()
 	p.SourceFuncs["croot"] = []model.SourceFunc{{

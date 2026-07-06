@@ -73,9 +73,9 @@ type builder struct {
 
 	projectName string
 
-	envSet   map[string]string
-	envUnset []string
-	execEnv  []model.ExecEnv
+	envSet      map[string]string
+	envUnset    []string
+	deferredEnv []model.DeferredEnv
 
 	pathPrepend []string
 	pathAppend  []string
@@ -144,8 +144,9 @@ func (b *builder) predeclared() starlark.StringDict {
 	})
 
 	miseModule := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
-		"tool": b.builtin("mise.tool", b.miseToolFn),
-		"jobs": b.builtin("mise.jobs", b.miseJobsFn),
+		"tool":  b.builtin("mise.tool", b.miseToolFn),
+		"jobs":  b.builtin("mise.jobs", b.miseJobsFn),
+		"where": b.builtin("mise.where", b.miseWhereFn),
 	})
 
 	pipModule := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
@@ -330,42 +331,76 @@ func (b *builder) envFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.
 		// Expand $VAR / ${VAR} references, preferring vars set earlier in this
 		// config, then the process environment.
 		b.envSet[name] = os.Expand(string(v), b.envLookup)
-	case execValue:
-		// Deferred command output: resolved at sync (static) or activation
-		// (dynamic), never during evaluation.
-		b.execEnv = append(b.execEnv, model.ExecEnv{Name: name, Command: v.command, Dynamic: v.dynamic, Shell: v.shell})
+	case deferredValue:
+		// A deferred value (shell.exec / mise.where, composed with +): resolved
+		// after evaluation, never during it.
+		b.deferredEnv = append(b.deferredEnv, model.DeferredEnv{Name: name, Segments: v.segments})
 	default:
-		return nil, fmt.Errorf("%s: value must be a string or shell.exec(...), got %s", fn.Name(), value.Type())
+		return nil, fmt.Errorf("%s: value must be a string, shell.exec(...), or mise.where(...), got %s", fn.Name(), value.Type())
 	}
 	return starlark.None, nil
 }
 
-// execValue is the deferred handle returned by shell.exec(...). It carries the
-// command to run and whether it is dynamic, but never runs it — evaluation stays
-// side-effect free. shell.env consumes it; using it anywhere else errors.
-type execValue struct {
-	command string
-	dynamic bool
-	shell   string
+// deferredValue is a lazily-resolved string: an ordered list of segments, each a
+// literal, an exec (shell.exec), or a where (mise.where). Producers return a
+// one-segment value; `+` concatenates. It never runs anything during evaluation,
+// so inspecting an untrusted config runs no code. shell.env consumes it; because
+// it is deferred it cannot be branched on at eval — use exists()/which()/env().
+type deferredValue struct{ segments []model.Segment }
+
+var (
+	_ starlark.Value     = deferredValue{}
+	_ starlark.HasBinary = deferredValue{}
+)
+
+func (v deferredValue) String() string        { return "deferred value" }
+func (v deferredValue) Type() string          { return "deferred" }
+func (v deferredValue) Freeze()               {}
+func (v deferredValue) Truth() starlark.Bool  { return starlark.True }
+func (v deferredValue) Hash() (uint32, error) { return 0, fmt.Errorf("deferred value is unhashable") }
+
+// Binary implements `+` for building composite values: deferred+string,
+// string+deferred, and deferred+deferred all concatenate segment lists (a string
+// becomes a literal segment). The join is literal (as `+` implies), so include
+// any separator. Other ops/operands return the default "unknown binary op" error.
+func (v deferredValue) Binary(op syntax.Token, y starlark.Value, side starlark.Side) (starlark.Value, error) {
+	if op != syntax.PLUS {
+		return nil, nil
+	}
+	other, ok := toSegments(y)
+	if !ok {
+		return nil, nil
+	}
+	if side == starlark.Left { // v + y
+		return deferredValue{segments: concatSegments(v.segments, other)}, nil
+	}
+	return deferredValue{segments: concatSegments(other, v.segments)}, nil // y + v
 }
 
-var _ starlark.Value = execValue{}
-
-func (e execValue) String() string {
-	return fmt.Sprintf("shell.exec(%q, dynamic=%t)", e.command, e.dynamic)
+// toSegments coerces a `+` operand into segments: a string becomes one literal
+// segment, a deferredValue contributes its own segments. Anything else is not a
+// supported operand.
+func toSegments(v starlark.Value) ([]model.Segment, bool) {
+	switch t := v.(type) {
+	case starlark.String:
+		return []model.Segment{{Kind: model.SegLiteral, Value: string(t)}}, true
+	case deferredValue:
+		return t.segments, true
+	}
+	return nil, false
 }
-func (e execValue) Type() string          { return "shell.exec" }
-func (e execValue) Freeze()               {}
-func (e execValue) Truth() starlark.Bool  { return starlark.True }
-func (e execValue) Hash() (uint32, error) { return 0, fmt.Errorf("shell.exec value is unhashable") }
+
+func concatSegments(a, b []model.Segment) []model.Segment {
+	out := make([]model.Segment, 0, len(a)+len(b))
+	out = append(out, a...)
+	out = append(out, b...)
+	return out
+}
 
 // execFn implements shell.exec(command, dynamic=False, shell=""): return a
-// deferred handle for a command whose stdout becomes an environment value via
-// shell.env. The command runs at sync time (dynamic=False, baked static into the
-// activation script) or in the shell on each activation (dynamic=True) — never
-// during evaluation, so inspecting an untrusted config never runs code. Because
-// the value is deferred it cannot be branched on at eval; use
-// exists()/which()/env() for that.
+// deferred value whose stdout becomes an environment value via shell.env. The
+// command runs at sync time (dynamic=False, baked into the activation script) or
+// in the shell on each activation (dynamic=True) — never during evaluation.
 //
 // shell picks the interpreter: "" (default) means the local shell ($SHELL, else
 // sh) for static resolution and the activating shell for a dynamic entry; a
@@ -379,7 +414,22 @@ func (b *builder) execFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark
 	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("%s: command must not be empty", fn.Name())
 	}
-	return execValue{command: command, dynamic: dynamic, shell: shell}, nil
+	return deferredValue{segments: []model.Segment{{Kind: model.SegExec, Value: command, Shell: shell, Dynamic: dynamic}}}, nil
+}
+
+// miseWhereFn implements mise.where(name): return a deferred value for the
+// directory where mise installed the tool (the same dir added to PATH), resolved
+// at sync time. Compose with `+` to append a subpath. Pass it to shell.env; the
+// tool must be a declared mise tool (validated in the plan).
+func (b *builder) miseWhereFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var name string
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "name", &name); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("%s: tool name must not be empty", fn.Name())
+	}
+	return deferredValue{segments: []model.Segment{{Kind: model.SegWhere, Value: name}}}, nil
 }
 
 // envLookup resolves a variable name for os.Expand: earlier env() values win
@@ -654,7 +704,7 @@ func (b *builder) finalize() (*model.Plan, error) {
 
 	p.EnvSet = b.envSet
 	p.EnvUnset = b.envUnset
-	p.ExecEnv = b.execEnv
+	p.DeferredEnv = b.deferredEnv
 	p.Aliases = b.aliases
 	p.SourceFuncs = b.sourceFuncs
 	p.Hooks = b.hooks
