@@ -174,8 +174,31 @@ func runSync(e *Env, args []string) int {
 	ifStale := fs.Bool("if-stale", false, "only sync if the config changed since the last sync (used by tau hook-env)")
 	verbose := fs.Bool("verbose", false, "print every sync step instead of a single updating line")
 	update := fs.Bool("update", false, "re-resolve unpinned tools/packages to their latest versions and update .taugres.lock")
+	force := fs.Bool("force", false, "reinstall tools/packages even if unchanged; limit to named managers, e.g. `tau sync --force mise`")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	// --force reinstalls even when a manager looks fresh: with no names it forces
+	// all managers, otherwise just the named ones (mise|pip|npm|uv). Positional
+	// args are only meaningful with --force.
+	forced := map[string]bool{}
+	if *force {
+		names := fs.Args()
+		if len(names) == 0 {
+			names = updManagers
+		}
+		for _, n := range names {
+			if strings.HasPrefix(n, "-") {
+				return fail(e, "sync: put flags before manager names, e.g. `tau sync --verbose --force mise` (got %q)", n)
+			}
+			if !slices.Contains(updManagers, n) {
+				return fail(e, "sync --force: unknown manager %q (want one of %s)", n, strings.Join(updManagers, ", "))
+			}
+			forced[n] = true
+		}
+	} else if rest := fs.Args(); len(rest) > 0 {
+		return fail(e, "sync: unexpected argument %q (did you mean `tau sync --force %s`?)", rest[0], strings.Join(rest, " "))
 	}
 
 	// Discovery is cheap and needed before locking.
@@ -296,7 +319,7 @@ func runSync(e *Env, args []string) int {
 	// state already carries the resolved versions from the last sync.
 	sig := toolSigs(plan, lk)
 	prior, _ := state.Load(plan.StateDir)
-	fresh := freshness(prior, sig, plan, *update)
+	fresh := freshness(prior, sig, plan, *update, forced)
 
 	var miseBinDirs, toolDirs []string
 	if prior != nil && fresh.allFresh() {
@@ -306,7 +329,7 @@ func runSync(e *Env, args []string) int {
 		toolDirs = prior.ToolDirs
 		miseBinDirs = miseBinDirsFrom(toolDirs, plan)
 	} else {
-		miseBinDirs, toolDirs = installTools(plan, lk, rep, *update, addErr, fresh)
+		miseBinDirs, toolDirs = installTools(plan, lk, rep, *update, forced, addErr, fresh)
 		// Persist the lockfile (best effort; it is committed with the project).
 		if err := lk.Save(d.ProjectRoot); err != nil {
 			addErr("writing " + lock.FileName + ": " + err.Error())
@@ -552,7 +575,7 @@ func (f toolFreshness) allFresh() bool {
 // set, it was added or dropped since the last sync, its signature changed, or
 // its recorded bin dirs are missing. The mise store dirs are recovered from the
 // prior manifest (so freshness needs no `mise where`).
-func freshness(prior *state.Manifest, cur map[string]string, plan *model.Plan, force bool) toolFreshness {
+func freshness(prior *state.Manifest, cur map[string]string, plan *model.Plan, update bool, forced map[string]bool) toolFreshness {
 	var priorSig map[string]string
 	var miseDirs []string
 	if prior != nil {
@@ -560,8 +583,8 @@ func freshness(prior *state.Manifest, cur map[string]string, plan *model.Plan, f
 		miseDirs = miseBinDirsFrom(prior.ToolDirs, plan)
 	}
 	// A manager is stale when it was declared before XOR now (added/dropped), or —
-	// when declared both times — --update forces it, its signature changed, or its
-	// dirs vanished. A manager declared in neither sync is fresh (nothing to do).
+	// when declared both times — --update or --force targets it, its signature
+	// changed, or its dirs vanished. A manager declared in neither sync is fresh.
 	stale := func(mgr string, declared bool, dirs []string) bool {
 		_, was := priorSig[mgr]
 		if declared != was {
@@ -570,7 +593,7 @@ func freshness(prior *state.Manifest, cur map[string]string, plan *model.Plan, f
 		if !declared {
 			return false
 		}
-		return force || cur[mgr] != priorSig[mgr] || !allExist(dirs)
+		return update || forced[mgr] || cur[mgr] != priorSig[mgr] || !allExist(dirs)
 	}
 	return toolFreshness{
 		miseStale: stale("mise", len(plan.MiseTools) > 0, miseDirs),
@@ -587,7 +610,7 @@ func freshness(prior *state.Manifest, cur map[string]string, plan *model.Plan, f
 // PATH) plus the full set of tool bin dirs (recorded for staleness). Install
 // failures are reported via addErr rather than aborting, so the shell env is
 // always built. It may hit the network and belongs to sync, never activation.
-func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, force bool, addErr func(string), fresh toolFreshness) (miseBinDirs, toolDirs []string) {
+func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, update bool, forced map[string]bool, addErr func(string), fresh toolFreshness) (miseBinDirs, toolDirs []string) {
 	// Tool output is streamed through the reporter prefixed with the tool name.
 	installReport := func(name string) func(bool) {
 		rep.Step("tau: installing " + name)
@@ -620,7 +643,7 @@ func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, force bool,
 		reqByName := map[string]string{}
 		for i, t := range plan.MiseTools {
 			e, ok := lk.Mise[t.Name]
-			effMise[i] = model.MiseTool{Name: t.Name, Version: lock.InstallVersion(t.Version, e, ok, force)}
+			effMise[i] = model.MiseTool{Name: t.Name, Version: lock.InstallVersion(t.Version, e, ok, update)}
 			reqByName[t.Name] = t.Version
 		}
 		// recordMise writes lock entries and returns the tools' bin dirs. Each
@@ -650,8 +673,10 @@ func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, force bool,
 			}
 		}
 
+		// --force mise reinstalls even already-present store versions.
+		miseForce := forced["mise"]
 		if len(toolchain) > 0 {
-			installed, err := mise.Install(toolchain, plan.MiseJobs, rep.Stream("mise: "), installReport)
+			installed, err := mise.Install(toolchain, plan.MiseJobs, miseForce, rep.Stream("mise: "), installReport)
 			if err != nil {
 				addErr(err.Error())
 			}
@@ -660,7 +685,7 @@ func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, force bool,
 		// The rest of the mise tools install concurrently with pip/npm/uv below.
 		if len(rest) > 0 {
 			wg.Go(func() {
-				installed, err := mise.Install(rest, plan.MiseJobs, rep.Stream("mise: "), installReport)
+				installed, err := mise.Install(rest, plan.MiseJobs, miseForce, rep.Stream("mise: "), installReport)
 				if err != nil {
 					addErr(err.Error())
 				}
@@ -706,7 +731,12 @@ func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, force bool,
 			continue
 		}
 		wg.Go(func() {
-			resolved, err := m.install(effectiveVersions(m.pkgs, m.section, force))
+			// --force <mgr> does a clean reinstall: tau owns these prefixes, so wipe
+			// and rebuild from the (locked) versions.
+			if forced[m.label] {
+				_ = os.RemoveAll(m.dir)
+			}
+			resolved, err := m.install(effectiveVersions(m.pkgs, m.section, update))
 			if err != nil {
 				addErr(err.Error())
 			}

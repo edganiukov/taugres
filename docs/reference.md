@@ -301,6 +301,7 @@ TAUGRES_STATE=/repo/service-a/.taugres
 tau init [--nested]        # create workspace.tg (or project.tg)
 tau check                  # evaluate + validate config
 tau sync [--update]        # install tools/packages and generate scripts (needs trust)
+tau sync --force [mgr...]   # reinstall even if unchanged (all, or just mise|pip|npm|uv)
 tau sync --verbose         # print every step and tool output
 tau update [name...]       # re-resolve unpinned tools/packages to latest (all, or just those named)
 tau exec [--] <cmd>...     # run a command with the project env/PATH applied (no shell hook); needs trust

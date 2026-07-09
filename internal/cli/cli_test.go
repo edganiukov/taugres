@@ -229,6 +229,40 @@ func TestExecNoCommand(t *testing.T) {
 	}
 }
 
+func TestSyncForceRejectsUnknownManager(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `project("x")`)
+	run(t, dir, "allow")
+	code, _, errOut := run(t, dir, "sync", "--force", "nope")
+	if code == 0 || !strings.Contains(errOut, "unknown manager") {
+		t.Errorf("expected unknown-manager error, code=%d err=%s", code, errOut)
+	}
+}
+
+func TestSyncRejectsStrayArg(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", `project("x")`)
+	run(t, dir, "allow")
+	code, _, errOut := run(t, dir, "sync", "mise") // no --force
+	if code == 0 || !strings.Contains(errOut, "unexpected argument") {
+		t.Errorf("expected unexpected-arg error, code=%d err=%s", code, errOut)
+	}
+}
+
+func TestSyncForceNoTools(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nshell.env(\"A\", \"b\")\n")
+	run(t, dir, "allow")
+	// --force on a project with no tools has nothing to reinstall; it just
+	// regenerates scripts and succeeds.
+	if code, _, errOut := run(t, dir, "sync", "--force"); code != 0 {
+		t.Fatalf("sync --force failed: %s", errOut)
+	}
+}
+
 func TestManualSyncPrintsDoneLine(t *testing.T) {
 	isolate(t)
 	dir := testutil.TempWorkspace(t)

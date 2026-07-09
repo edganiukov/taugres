@@ -345,7 +345,9 @@ present; when every manager is fresh the whole install phase is skipped and only
 the shell scripts regenerate. This is a distinct *group* from the env-trigger
 checks (the input/tooldir/probe dimensions in `internal/state`): the env checks
 decide *whether* to sync; the signatures decide *what work* the sync does.
-`--update` forces every manager.
+`--update` forces every manager (re-resolving versions); `--force [mgr...]`
+forces the named managers (or all) at their locked versions — a clean reinstall
+(tau-owned pip/uv/npm prefixes are wiped and rebuilt; mise runs with `--force`).
 
 The signatures subsume per-manager freshness, so there are no separate `Fresh()`
 helpers. mise stays offline too: its store bin dirs are recovered from the

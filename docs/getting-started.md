@@ -217,7 +217,13 @@ resolved concrete version; subsequent syncs install exactly that, so an unpinned
 both the requested spec and the resolved version, so editing a version in the
 config automatically re-resolves that entry.
 
-- `tau sync` — reproducible: install locked versions.
+- `tau sync` — reproducible: install locked versions. Skips a manager whose
+  declared set is unchanged and whose bin dirs are present.
+- `tau sync --force [mgr...]` — reinstall even when unchanged, at the **locked**
+  versions (no re-resolve). With no names it forces every manager; otherwise just
+  the named ones (`mise`/`pip`/`npm`/`uv`) — e.g. `tau sync --force pip` when a
+  venv got corrupted. tau-owned prefixes (pip/uv/npm) are wiped and rebuilt; mise
+  runs `mise install --force`.
 - `tau sync --update` — re-resolve **all unpinned** tools/packages to their
   latest and rewrite the lock. (Pinned entries are controlled by editing the
   config.)
@@ -243,7 +249,7 @@ tools live in mise's shared store, so only their lock entry is dropped.
 | --- | --- |
 | `tau init [--nested]` | create `workspace.tg` (or `project.tg`) |
 | `tau check` | evaluate + validate config, report warnings/errors |
-| `tau sync [--verbose] [--update]` | evaluate config, install tools, generate shell scripts (requires trust) |
+| `tau sync [--verbose] [--update] [--force [mgr...]]` | evaluate config, install tools, generate shell scripts (requires trust); `--force` reinstalls even if unchanged |
 | `tau update [name...]` | re-resolve unpinned tools/packages to latest (all, or just those named; `<manager>:name` to disambiguate) |
 | `tau exec [--] <cmd>...` | run a command with the project env/PATH applied, no shell hook (requires trust) |
 | `tau status` | show active project, sync state, and trust |

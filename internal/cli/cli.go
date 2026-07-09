@@ -93,7 +93,7 @@ func printUsage(w io.Writer) {
 Usage:
   tau init [--nested]        create workspace.tg (or project.tg)
   tau check                  evaluate and validate the active config
-  tau sync [--update]        install tools and generate shell scripts
+  tau sync [--update]        install tools and generate shell scripts (--force to reinstall)
   tau update [name...]       re-resolve unpinned tools/packages to latest (all, or just those named)
   tau exec [--] <cmd>...     run a command with the project's env/PATH applied (no shell hook)
   tau status                 show active project, sync state, and tools
@@ -109,6 +109,7 @@ Usage:
 
 Flags:
   tau sync --update          re-resolve unpinned tools to latest, update .taugres.lock
+  tau sync --force [mgr...]   reinstall tools even if unchanged (all, or just mise|pip|npm|uv)
   tau sync --verbose         print every step and tool output
 
 Install the hook:
