@@ -426,8 +426,14 @@ func buildManifest(res *config.Result, toolDirs []string, toolSig map[string]str
 			return nil, err
 		}
 	}
-	// shell.dotenv(...) files are config inputs too: editing one changes the env.
+	// shell.dotenv(...) and read(...) files are config inputs too: editing one
+	// changes the resulting env.
 	for _, f := range res.DotenvFiles {
+		if err := add(f); err != nil {
+			return nil, err
+		}
+	}
+	for _, f := range res.ReadFiles {
 		if err := add(f); err != nil {
 			return nil, err
 		}

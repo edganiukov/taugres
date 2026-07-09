@@ -456,6 +456,43 @@ shell.env("GO", mise.where("go") + "/go")
 	}
 }
 
+func TestRead(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, ".python-version", "3.12.7\n")
+	testutil.WriteFile(t, dir, "workspace.tg", `
+project("x")
+ver = read("//.python-version").strip()
+mise.tool("python@" + ver)
+shell.env("PYVER", ver)
+shell.env("MISSING", read("//nope", default = "fallback"))
+`)
+	res := evalWorkspace(t, dir)
+	p := res.Plan
+	if p.EnvSet["PYVER"] != "3.12.7" {
+		t.Errorf("PYVER = %q, want 3.12.7 (read + .strip())", p.EnvSet["PYVER"])
+	}
+	// read() is a real eval-time string, usable in composition/args.
+	if len(p.MiseTools) == 0 || p.MiseTools[0].Version != "3.12.7" {
+		t.Errorf("mise tool from read = %+v", p.MiseTools)
+	}
+	if p.EnvSet["MISSING"] != "fallback" {
+		t.Errorf("missing-file default = %q, want fallback", p.EnvSet["MISSING"])
+	}
+	// The read file is tracked as a config input for stale detection.
+	if len(res.ReadFiles) != 1 || res.ReadFiles[0] != filepath.Join(dir, ".python-version") {
+		t.Errorf("ReadFiles = %v", res.ReadFiles)
+	}
+}
+
+func TestReadMissingNoDefaultErrors(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nshell.env(\"X\", read(\"//nope\"))\n")
+	d, _ := discover.Discover(dir)
+	if _, err := Evaluate(d); err == nil {
+		t.Error("expected error reading a missing file with no default")
+	}
+}
+
 func TestDeferredCompose(t *testing.T) {
 	dir := testutil.TempWorkspace(t)
 	testutil.WriteFile(t, dir, "workspace.tg", `

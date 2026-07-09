@@ -99,10 +99,11 @@ next prompt without a manual step (see Shell hook).
 Starlark gives real functions, conditionals, deterministic evaluation, and
 `load(...)` imports. The API is side-effect style: calls mutate an in-memory
 plan, never the host. Host access is limited to read-only probes for conditional
-config — `exists(path)`, `which(name)`, and `env(name)` — which can read the
-filesystem/PATH/environment but never run commands or write anything.
-`shell.dotenv(path)` likewise only *reads* a `.env` file into the plan's
-environment.
+config — `exists(path)`, `which(name)`, `env(name)`, and `read(path)` (file
+contents) — which can read the filesystem/PATH/environment but never run commands
+or write anything. `shell.dotenv(path)` likewise only *reads* a `.env` file into
+the plan's environment. Because these return real values at evaluation, config can
+branch and compose on them freely (a programmable env) while eval stays pure.
 
 Running a command is the one thing evaluation must never do — `tau
 check`/`status`/`allow` evaluate *untrusted* configs, so eval-time execution

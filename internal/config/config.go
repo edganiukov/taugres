@@ -33,6 +33,7 @@ type Result struct {
 	Plan          *model.Plan
 	LoadedModules []string      // absolute paths of loaded .tg modules
 	DotenvFiles   []string      // absolute paths of shell.dotenv(...) files (config inputs)
+	ReadFiles     []string      // absolute paths of read(...) files (config inputs)
 	Probes        []model.Probe // exists()/which()/env() observations, for stale detection
 }
 
@@ -59,7 +60,7 @@ func Evaluate(d *discover.Discovery) (*Result, error) {
 		return nil, err
 	}
 
-	return &Result{Plan: plan, LoadedModules: b.loadedList(), DotenvFiles: b.dotenvFiles, Probes: b.probes}, nil
+	return &Result{Plan: plan, LoadedModules: b.loadedList(), DotenvFiles: b.dotenvFiles, ReadFiles: b.readFiles, Probes: b.probes}, nil
 }
 
 type loadEntry struct {
@@ -97,6 +98,11 @@ type builder struct {
 	dotenvFiles []string
 	dotenvSeen  map[string]bool
 
+	// readFiles records read(...) file paths (deduped), tracked as config inputs
+	// so editing a read file re-syncs.
+	readFiles []string
+	readSeen  map[string]bool
+
 	// probes records exists()/which()/env() observations for stale detection.
 	probes    []model.Probe
 	probeSeen map[string]bool
@@ -111,6 +117,7 @@ func newBuilder(d *discover.Discovery) *builder {
 		loaded:      map[string]bool{},
 		loadCache:   map[string]*loadEntry{},
 		dotenvSeen:  map[string]bool{},
+		readSeen:    map[string]bool{},
 		probeSeen:   map[string]bool{},
 		miseJobs:    defaultMiseJobs,
 	}
@@ -171,6 +178,7 @@ func (b *builder) predeclared() starlark.StringDict {
 		"exists":   b.builtin("exists", b.existsFn),
 		"which":    b.builtin("which", b.whichFn),
 		"env":      b.builtin("env", b.envProbeFn),
+		"read":     b.builtin("read", b.readFn),
 		"shell":    shellModule,
 		"mise":     miseModule,
 		"pip":      pipModule,
@@ -259,6 +267,38 @@ func (b *builder) envProbeFn(_ *starlark.Thread, fn *starlark.Builtin, args star
 		return starlark.String(def), nil
 	}
 	return starlark.String(val), nil
+}
+
+// readFn implements read(path, default=...): return the contents of a file at a
+// root-anchored ("//…") or absolute path, as a string, for use anywhere in the
+// config. It only *reads* (no code runs), so it is safe during evaluation. The
+// file's presence is recorded as an exists() probe (so it appearing/disappearing
+// re-syncs) and, when present, tracked as a config input (so editing it
+// re-syncs). A missing file returns default if one is given, else it is an error.
+// Contents are returned raw; use .strip() to drop a trailing newline.
+func (b *builder) readFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var path string
+	var def starlark.Value
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "path", &path, "default?", &def); err != nil {
+		return nil, err
+	}
+	resolved, err := b.resolvePath(path)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := os.ReadFile(resolved)
+	b.recordProbe("exists", resolved, boolResult(readErr == nil))
+	if readErr != nil {
+		if s, ok := starlark.AsString(def); ok {
+			return starlark.String(s), nil
+		}
+		return nil, fmt.Errorf("%s: %v", fn.Name(), readErr)
+	}
+	if !b.readSeen[resolved] {
+		b.readSeen[resolved] = true
+		b.readFiles = append(b.readFiles, resolved)
+	}
+	return starlark.String(data), nil
 }
 
 // dotenvFn implements shell.dotenv(path): load KEY=VALUE pairs from a .env file

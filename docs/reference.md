@@ -118,6 +118,7 @@ platform.arch                   # "amd64" | "arm64" | ...
 exists("//go.mod")              # bool: root-anchored/absolute path on disk?
 which("docker")                 # abs path of a PATH binary, or None
 env("CI", "")                   # value of a process env var, or the default when unset
+read("//VERSION", default="")   # file contents as a string (default when missing)
 
 load("//taugres/lib/x.tg", "sym")   # root-anchored
 load("./lib/x.tg", "sym")           # relative to the importing file
@@ -168,10 +169,28 @@ matches what tau puts on PATH.)
 declaration order, inside the trust gate; they are not undone on deactivation
 (fire-and-forget, like a function body).
 
-`exists()`, `which()`, and `env()` are read-only probes: they read the
-filesystem/PATH/environment but never run commands or write anything, and their
-results are recorded so a later change re-syncs (see
-[design.md](design.md#staleness-checks)).
+`exists()`, `which()`, `env()`, and `read()` are read-only: they read the
+filesystem/PATH/environment but never run commands or write anything, so they
+return **real values at evaluation** — use them freely in `if`, string ops, and
+your own functions to build a programmable config. Their results are recorded so a
+later change re-syncs (see [design.md](design.md#staleness-checks)).
+
+### Reading files (`read`)
+
+`read(path, default=...)` returns a file's contents as a string (root-anchored
+`//…` or absolute). Because it's a plain value, compose with it directly:
+
+```python
+ver = read("//.python-version").strip()   # .strip() drops the trailing newline
+mise.tool("python@" + ver)
+if "beta" in read("//channel", default = "stable"):
+    shell.env("CHANNEL", "beta")
+```
+
+A missing file returns `default` if given, else it's an error. The file is tracked
+as a config input (editing it re-syncs) and its presence as a probe (so it
+appearing/disappearing re-syncs). Unlike `shell.exec`, `read` runs no code, so its
+result is a normal string you can branch on at eval.
 
 ### `.env` files (`shell.dotenv`)
 
