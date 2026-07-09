@@ -8,21 +8,31 @@ package toolenv
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/edganiukov/taugres/internal/ui"
 )
+
+// interruptGrace is how long a child gets to exit after SIGINT before it is
+// force-killed when the context is cancelled (Ctrl+C during sync).
+const interruptGrace = 3 * time.Second
 
 // Run executes cmd, streaming its combined output to out (when non-nil) while
 // also capturing it. On failure it returns an error naming `what`; when out was
 // nil (quiet mode) the captured output is included, prefixed, so it is not lost.
 // Shared by the mise/pip/npm integrations.
-func Run(cmd *exec.Cmd, out io.Writer, prefix, what string) error {
+//
+// If ctx is cancelled (Ctrl+C), the child is sent SIGINT, then SIGKILL after a
+// short grace period, and ctx.Err() is returned — so a long install stops
+// promptly instead of running to completion.
+func Run(ctx context.Context, cmd *exec.Cmd, out io.Writer, prefix, what string) error {
 	var captured bytes.Buffer
 	w := io.Writer(&captured)
 	if out != nil {
@@ -30,16 +40,36 @@ func Run(cmd *exec.Cmd, out io.Writer, prefix, what string) error {
 	}
 	cmd.Stdout = w
 	cmd.Stderr = w
-	if err := cmd.Run(); err != nil {
-		if out != nil {
-			return fmt.Errorf("%s failed", what)
-		}
-		if msg := strings.TrimSpace(captured.String()); msg != "" {
-			return fmt.Errorf("%s failed:\n%s", what, ui.PrefixLines(msg, prefix))
-		}
+
+	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("%s: %w", what, err)
 	}
-	return nil
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case <-ctx.Done():
+		_ = cmd.Process.Signal(os.Interrupt)
+		select {
+		case <-done:
+		case <-time.After(interruptGrace):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+		return ctx.Err()
+	case err := <-done:
+		if err != nil {
+			if out != nil {
+				return fmt.Errorf("%s failed", what)
+			}
+			if msg := strings.TrimSpace(captured.String()); msg != "" {
+				return fmt.Errorf("%s failed:\n%s", what, ui.PrefixLines(msg, prefix))
+			}
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		return nil
+	}
 }
 
 // Reporter observes install steps. It is called with a package/tool reference

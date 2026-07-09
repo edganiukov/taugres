@@ -8,6 +8,7 @@
 package mise
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -45,7 +46,7 @@ func ref(t model.MiseTool) string {
 // <= 0 leaves it to mise. When out is non-nil, mise's raw output is written to
 // it live (the caller prefixes lines); it is also captured so a failure can
 // surface the output in the error.
-func install(refs []string, jobs int, force bool, out io.Writer) error {
+func install(ctx context.Context, refs []string, jobs int, force bool, out io.Writer) error {
 	args := []string{"install"}
 	if force {
 		args = append(args, "--force") // reinstall even if the version is already present
@@ -56,7 +57,7 @@ func install(refs []string, jobs int, force bool, out io.Writer) error {
 
 	args = append(args, refs...)
 	cmd := exec.Command(Binary, args...)
-	return toolenv.Run(cmd, out, outputPrefix, "mise install "+strings.Join(refs, " "))
+	return toolenv.Run(ctx, cmd, out, outputPrefix, "mise install "+strings.Join(refs, " "))
 }
 
 // binDir finds the directory holding a tool's executables within its install
@@ -140,7 +141,7 @@ type Installed struct {
 // the resolved concrete version and bin dir. When out is non-nil, mise's output
 // is streamed to it live. force passes `mise install --force`, reinstalling even
 // tools already present in the store.
-func Install(tools []model.MiseTool, jobs int, force bool, out io.Writer, report Reporter) ([]Installed, error) {
+func Install(ctx context.Context, tools []model.MiseTool, jobs int, force bool, out io.Writer, report Reporter) ([]Installed, error) {
 	if len(tools) == 0 {
 		return nil, nil
 	}
@@ -162,9 +163,9 @@ func Install(tools []model.MiseTool, jobs int, force bool, out io.Writer, report
 	// rate-limited backend), fall back to installing each tool on its own so a
 	// single bad tool does not prevent the others — critically the pip/npm
 	// toolchain — from landing.
-	if batchErr := install(refs, jobs, force, out); batchErr != nil {
+	if batchErr := install(ctx, refs, jobs, force, out); batchErr != nil {
 		for _, t := range tools {
-			_ = install([]string{ref(t)}, jobs, force, out)
+			_ = install(ctx, []string{ref(t)}, jobs, force, out)
 		}
 	}
 

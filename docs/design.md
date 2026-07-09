@@ -335,6 +335,12 @@ PATH, aliases, functions) is always generated so the shell still works, and the
 tool can be retried. Tool output is shown only with `tau sync --verbose`;
 otherwise a single spinner line reports progress.
 
+`tau sync` is **interruptible**: `Ctrl+C` cancels a context threaded through
+every child process (installs and `shell.exec`), which is sent SIGINT then killed
+after a short grace period. The manifest is not written, so an interrupted sync
+leaves the environment un-fresh and the next sync retries; tau exits 130. (`tau
+exec`'s own command is left to handle the terminal's signal itself.)
+
 **Per-manager staleness.** A sync often runs for a reason unrelated to tools (a
 probe flip, an edited alias, `--if-stale`). Each manager therefore carries a
 **signature** in the manifest — `toolsig:<mgr>:<sha256>`, a hash of its declared

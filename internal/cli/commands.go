@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -201,6 +202,8 @@ func runSync(e *Env, args []string) int {
 		return fail(e, "sync: unexpected argument %q (did you mean `tau sync --force %s`?)", rest[0], strings.Join(rest, " "))
 	}
 
+	ctx := e.ctx() // cancelled on Ctrl+C so tool installs stop promptly
+
 	// Discovery is cheap and needed before locking.
 	d, err := discover.Discover(e.Wd)
 	if err != nil {
@@ -329,7 +332,7 @@ func runSync(e *Env, args []string) int {
 		toolDirs = prior.ToolDirs
 		miseBinDirs = miseBinDirsFrom(toolDirs, plan)
 	} else {
-		miseBinDirs, toolDirs = installTools(plan, lk, rep, *update, forced, addErr, fresh)
+		miseBinDirs, toolDirs = installTools(ctx, plan, lk, rep, *update, forced, addErr, fresh)
 		// Persist the lockfile (best effort; it is committed with the project).
 		if err := lk.Save(d.ProjectRoot); err != nil {
 			addErr("writing " + lock.FileName + ": " + err.Error())
@@ -338,6 +341,21 @@ func runSync(e *Env, args []string) int {
 		// now-resolved versions; the next sync's signatures (read from the same lock
 		// on disk) then match and each manager takes the fast path.
 		sig = toolSigs(plan, lk)
+	}
+
+	// If the user interrupted (Ctrl+C) during installs, stop here without writing
+	// scripts or the manifest, so the environment is not marked fresh and the next
+	// sync retries.
+	interrupted := func() bool {
+		if ctx.Err() == nil {
+			return false
+		}
+		rep.Done()
+		fmt.Fprintln(e.Stderr, "tau: sync interrupted")
+		return true
+	}
+	if interrupted() {
+		return 130
 	}
 
 	// Prepend mise tool bin dirs to the activation PATH (in front of the
@@ -349,7 +367,10 @@ func runSync(e *Env, args []string) int {
 	// into EnvSet; values with a dynamic exec have their static segments baked in
 	// place and are rendered as command substitutions at activation. Best-effort:
 	// a failure is reported but never aborts the sync.
-	resolveDeferredEnvForSync(plan, lk, addErr)
+	resolveDeferredEnvForSync(ctx, plan, lk, addErr)
+	if interrupted() {
+		return 130
+	}
 
 	rep.Step("tau: generating shell scripts")
 	genDir := state.GenDir(plan.StateDir)
@@ -610,7 +631,7 @@ func freshness(prior *state.Manifest, cur map[string]string, plan *model.Plan, u
 // PATH) plus the full set of tool bin dirs (recorded for staleness). Install
 // failures are reported via addErr rather than aborting, so the shell env is
 // always built. It may hit the network and belongs to sync, never activation.
-func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, update bool, forced map[string]bool, addErr func(string), fresh toolFreshness) (miseBinDirs, toolDirs []string) {
+func installTools(ctx context.Context, plan *model.Plan, lk *lock.File, rep *ui.Reporter, update bool, forced map[string]bool, addErr func(string), fresh toolFreshness) (miseBinDirs, toolDirs []string) {
 	// Tool output is streamed through the reporter prefixed with the tool name.
 	installReport := func(name string) func(bool) {
 		rep.Step("tau: installing " + name)
@@ -676,7 +697,7 @@ func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, update bool
 		// --force mise reinstalls even already-present store versions.
 		miseForce := forced["mise"]
 		if len(toolchain) > 0 {
-			installed, err := mise.Install(toolchain, plan.MiseJobs, miseForce, rep.Stream("mise: "), installReport)
+			installed, err := mise.Install(ctx, toolchain, plan.MiseJobs, miseForce, rep.Stream("mise: "), installReport)
 			if err != nil {
 				addErr(err.Error())
 			}
@@ -685,7 +706,7 @@ func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, update bool
 		// The rest of the mise tools install concurrently with pip/npm/uv below.
 		if len(rest) > 0 {
 			wg.Go(func() {
-				installed, err := mise.Install(rest, plan.MiseJobs, miseForce, rep.Stream("mise: "), installReport)
+				installed, err := mise.Install(ctx, rest, plan.MiseJobs, miseForce, rep.Stream("mise: "), installReport)
 				if err != nil {
 					addErr(err.Error())
 				}
@@ -704,23 +725,27 @@ func installTools(plan *model.Plan, lk *lock.File, rep *ui.Reporter, update bool
 		{
 			label: "pip", stale: fresh.pipStale, pkgs: plan.PipPackages, dir: pkgDir("pip"), section: lk.Pip,
 			install: func(p []model.Package) (map[string]string, error) {
-				return pip.Install(p, pkgDir("pip"), toolchainBinDirs, rep.Stream("pip: "), installReport)
+				return pip.Install(ctx, p, pkgDir("pip"), toolchainBinDirs, rep.Stream("pip: "), installReport)
 			},
-			uninstall: func(n []string) error { return pip.Uninstall(pkgDir("pip"), n, rep.Stream("pip: ")) },
+			uninstall: func(n []string) error { return pip.Uninstall(ctx, pkgDir("pip"), n, rep.Stream("pip: ")) },
 		},
 		{
 			label: "npm", stale: fresh.npmStale, pkgs: plan.NpmPackages, dir: pkgDir("npm"), section: lk.Npm,
 			install: func(p []model.Package) (map[string]string, error) {
-				return npm.Install(p, pkgDir("npm"), toolchainBinDirs, rep.Stream("npm: "), installReport)
+				return npm.Install(ctx, p, pkgDir("npm"), toolchainBinDirs, rep.Stream("npm: "), installReport)
 			},
-			uninstall: func(n []string) error { return npm.Uninstall(pkgDir("npm"), n, toolchainBinDirs, rep.Stream("npm: ")) },
+			uninstall: func(n []string) error {
+				return npm.Uninstall(ctx, pkgDir("npm"), n, toolchainBinDirs, rep.Stream("npm: "))
+			},
 		},
 		{
 			label: "uv", stale: fresh.uvStale, pkgs: plan.UvPackages, dir: pkgDir("uv"), section: lk.Uv,
 			install: func(p []model.Package) (map[string]string, error) {
-				return uv.Install(p, pkgDir("uv"), toolchainBinDirs, rep.Stream("uv: "), installReport)
+				return uv.Install(ctx, p, pkgDir("uv"), toolchainBinDirs, rep.Stream("uv: "), installReport)
 			},
-			uninstall: func(n []string) error { return uv.Uninstall(pkgDir("uv"), n, toolchainBinDirs, rep.Stream("uv: ")) },
+			uninstall: func(n []string) error {
+				return uv.Uninstall(ctx, pkgDir("uv"), n, toolchainBinDirs, rep.Stream("uv: "))
+			},
 		},
 	}
 	// Install stale managers concurrently (with the rest of mise, above). They use
@@ -1152,7 +1177,7 @@ func runExec(e *Env, args []string) int {
 	if len(plan.DeferredEnv) > 0 {
 		lk, _ := lock.Load(d.ProjectRoot)
 		for _, de := range plan.DeferredEnv {
-			val, derr := resolveDeferred(de.Segments, lk, plan, flattenEnv(envMap))
+			val, derr := resolveDeferred(e.ctx(), de.Segments, lk, plan, flattenEnv(envMap))
 			if derr != nil {
 				fmt.Fprintf(e.Stderr, "tau: shell.env %s: %v\n", de.Name, derr)
 				continue
@@ -1246,7 +1271,7 @@ func flattenEnv(env map[string]string) []string {
 // to literals in place and is left for the renderer to emit as `$(cmd)`. Failures
 // are reported via onErr (best-effort), never fatal. Each entry runs against the
 // current env (including EnvSet updated by earlier static entries).
-func resolveDeferredEnvForSync(plan *model.Plan, lk *lock.File, onErr func(string)) {
+func resolveDeferredEnvForSync(ctx context.Context, plan *model.Plan, lk *lock.File, onErr func(string)) {
 	for i := range plan.DeferredEnv {
 		de := &plan.DeferredEnv[i]
 		if de.IsDynamic() {
@@ -1257,7 +1282,7 @@ func resolveDeferredEnvForSync(plan *model.Plan, lk *lock.File, onErr func(strin
 				if s.Kind == model.SegExec && s.Dynamic {
 					continue
 				}
-				val, err := resolveSegment(*s, lk, plan, flattenEnv(projectEnvMap(plan, nil)))
+				val, err := resolveSegment(ctx, *s, lk, plan, flattenEnv(projectEnvMap(plan, nil)))
 				if err != nil {
 					onErr("shell.env " + de.Name + ": " + err.Error())
 					continue
@@ -1266,7 +1291,7 @@ func resolveDeferredEnvForSync(plan *model.Plan, lk *lock.File, onErr func(strin
 			}
 			continue
 		}
-		val, err := resolveDeferred(de.Segments, lk, plan, flattenEnv(projectEnvMap(plan, nil)))
+		val, err := resolveDeferred(ctx, de.Segments, lk, plan, flattenEnv(projectEnvMap(plan, nil)))
 		if err != nil {
 			onErr("shell.env " + de.Name + ": " + err.Error())
 			continue
@@ -1277,10 +1302,10 @@ func resolveDeferredEnvForSync(plan *model.Plan, lk *lock.File, onErr func(strin
 
 // resolveDeferred resolves every segment (including dynamic exec) and joins them.
 // Used by `tau exec`, which has no shell to defer to.
-func resolveDeferred(segs []model.Segment, lk *lock.File, plan *model.Plan, env []string) (string, error) {
+func resolveDeferred(ctx context.Context, segs []model.Segment, lk *lock.File, plan *model.Plan, env []string) (string, error) {
 	var b strings.Builder
 	for _, s := range segs {
-		val, err := resolveSegment(s, lk, plan, env)
+		val, err := resolveSegment(ctx, s, lk, plan, env)
 		if err != nil {
 			return "", err
 		}
@@ -1292,14 +1317,14 @@ func resolveDeferred(segs []model.Segment, lk *lock.File, plan *model.Plan, env 
 // resolveSegment resolves a single segment to its string value: a literal as-is,
 // a mise.where to the tool's bin dir (looked up via the locked version so it
 // matches PATH), or an exec to its command's trimmed stdout.
-func resolveSegment(s model.Segment, lk *lock.File, plan *model.Plan, env []string) (string, error) {
+func resolveSegment(ctx context.Context, s model.Segment, lk *lock.File, plan *model.Plan, env []string) (string, error) {
 	switch s.Kind {
 	case model.SegLiteral:
 		return s.Value, nil
 	case model.SegWhere:
 		return mise.ToolBinDir(s.Value, miseVersion(s.Value, lk, plan))
 	case model.SegExec:
-		return captureCommand(s.Shell, s.Value, plan.ProjectRoot, env)
+		return captureCommand(ctx, s.Shell, s.Value, plan.ProjectRoot, env)
 	default:
 		return "", fmt.Errorf("unknown segment kind %q", s.Kind)
 	}
@@ -1336,8 +1361,8 @@ func resolveShell(shell string) string {
 // captureCommand runs `<shell> -c command` in dir with env and returns its stdout
 // with trailing newlines trimmed (like shell command substitution). shell is the
 // interpreter name ("" resolves to the local $SHELL, else sh). Backs shell.exec.
-func captureCommand(shell, command, dir string, env []string) (string, error) {
-	cmd := exec.Command(resolveShell(shell), "-c", command)
+func captureCommand(ctx context.Context, shell, command, dir string, env []string) (string, error) {
+	cmd := exec.CommandContext(ctx, resolveShell(shell), "-c", command)
 	cmd.Dir = dir
 	cmd.Env = env
 	var out, errb bytes.Buffer

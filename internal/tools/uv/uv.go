@@ -9,6 +9,7 @@
 package uv
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
@@ -42,7 +43,7 @@ func BinDir(venvDir string) string {
 // into it (each Package.Version is the exact spec), using uv/python from the
 // mise toolchain dirs. It returns each package's resolved concrete version.
 // When out is non-nil, uv's output is streamed live.
-func Install(pkgs []model.Package, venvDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
+func Install(ctx context.Context, pkgs []model.Package, venvDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
 	if len(pkgs) == 0 {
 		return nil, nil
 	}
@@ -54,7 +55,7 @@ func Install(pkgs []model.Package, venvDir string, toolchainBins []string, out i
 	venvPython := filepath.Join(BinDir(venvDir), "python")
 	if !toolenv.IsExecutable(venvPython) {
 		python := toolenv.Resolve(toolchainBins, "python3", "python")
-		if err := run(uvExe, []string{"venv", "--python", python, venvDir}, out, "uv venv"); err != nil {
+		if err := run(ctx, uvExe, []string{"venv", "--python", python, venvDir}, out, "uv venv"); err != nil {
 			return nil, err
 		}
 	}
@@ -71,7 +72,7 @@ func Install(pkgs []model.Package, venvDir string, toolchainBins []string, out i
 	}
 
 	args := append([]string{"pip", "install", "--python", venvPython}, refs...)
-	if err := run(uvExe, args, out, "uv pip install "+strings.Join(refs, " ")); err != nil {
+	if err := run(ctx, uvExe, args, out, "uv pip install "+strings.Join(refs, " ")); err != nil {
 		finish(false)
 		return nil, err
 	}
@@ -87,7 +88,7 @@ func Install(pkgs []model.Package, venvDir string, toolchainBins []string, out i
 
 // Uninstall removes the named packages from the venv (best effort). Used to GC
 // packages dropped from the config.
-func Uninstall(venvDir string, names []string, toolchainBins []string, out io.Writer) error {
+func Uninstall(ctx context.Context, venvDir string, names []string, toolchainBins []string, out io.Writer) error {
 	if len(names) == 0 {
 		return nil
 	}
@@ -99,7 +100,7 @@ func Uninstall(venvDir string, names []string, toolchainBins []string, out io.Wr
 
 	uvExe := toolenv.Resolve(toolchainBins, "uv")
 	args := append([]string{"pip", "uninstall", "--python", venvPython}, names...)
-	return run(uvExe, args, out, "uv pip uninstall")
+	return run(ctx, uvExe, args, out, "uv pip uninstall")
 }
 
 // installedVersion returns the concrete installed version via `uv pip show`, or
@@ -113,6 +114,6 @@ func installedVersion(uvExe, venvPython, name string) string {
 	return toolenv.ScrapeVersion(out)
 }
 
-func run(bin string, args []string, out io.Writer, what string) error {
-	return toolenv.Run(exec.Command(bin, args...), out, outputPrefix, what)
+func run(ctx context.Context, bin string, args []string, out io.Writer, what string) error {
+	return toolenv.Run(ctx, exec.Command(bin, args...), out, outputPrefix, what)
 }

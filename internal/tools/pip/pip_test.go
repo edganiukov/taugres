@@ -2,6 +2,7 @@ package pip
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,7 +39,7 @@ func TestInstallCreatesVenvAndInstalls(t *testing.T) {
 	venv := filepath.Join(testutil.TempWorkspace(t), ".taugres", "tools", "pip")
 
 	var out bytes.Buffer
-	_, err := Install([]model.Package{{Name: "requests", Version: "2.31.0"}, {Name: "rich"}}, venv, []string{toolchain}, &out, nil)
+	_, err := Install(context.Background(), []model.Package{{Name: "requests", Version: "2.31.0"}, {Name: "rich"}}, venv, []string{toolchain}, &out, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,14 +57,14 @@ func TestInstallReusesExistingVenv(t *testing.T) {
 	toolchain := fakeToolchain(t)
 	venv := filepath.Join(testutil.TempWorkspace(t), ".taugres", "tools", "pip")
 
-	if _, err := Install([]model.Package{{Name: "rich"}}, venv, []string{toolchain}, nil, nil); err != nil {
+	if _, err := Install(context.Background(), []model.Package{{Name: "rich"}}, venv, []string{toolchain}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(venv, "bin", "MARKER")
 	if err := os.WriteFile(marker, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Install([]model.Package{{Name: "requests"}}, venv, []string{toolchain}, nil, nil); err != nil {
+	if _, err := Install(context.Background(), []model.Package{{Name: "requests"}}, venv, []string{toolchain}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -74,14 +75,14 @@ func TestInstallReusesExistingVenv(t *testing.T) {
 func TestInstallErrorsWithoutPython(t *testing.T) {
 	// Empty toolchain + a PATH with no python.
 	t.Setenv("PATH", t.TempDir())
-	_, err := Install([]model.Package{{Name: "rich"}}, t.TempDir(), nil, nil, nil)
+	_, err := Install(context.Background(), []model.Package{{Name: "rich"}}, t.TempDir(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when no python interpreter is available")
 	}
 }
 
 func TestInstallNoPackagesIsNoop(t *testing.T) {
-	if _, err := Install(nil, t.TempDir(), nil, nil, nil); err != nil {
+	if _, err := Install(context.Background(), nil, t.TempDir(), nil, nil, nil); err != nil {
 		t.Errorf("empty install should be a no-op, got %v", err)
 	}
 }

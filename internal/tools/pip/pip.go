@@ -9,6 +9,7 @@
 package pip
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -45,7 +46,7 @@ func BinDir(venvDir string) string {
 // it (each Package.Version is the exact spec to install), using the Python
 // interpreter from the mise toolchain dirs. It returns each package's resolved
 // concrete version. When out is non-nil, pip's output is streamed live.
-func Install(pkgs []model.Package, venvDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
+func Install(ctx context.Context, pkgs []model.Package, venvDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
 	if len(pkgs) == 0 {
 		return nil, nil
 	}
@@ -53,7 +54,7 @@ func Install(pkgs []model.Package, venvDir string, toolchainBins []string, out i
 	if _, err := exec.LookPath(python); err != nil {
 		return nil, fmt.Errorf("pip.install: python interpreter not found (expected mise to provide it): %s", python)
 	}
-	if err := ensureVenv(venvDir, python, out); err != nil {
+	if err := ensureVenv(ctx, venvDir, python, out); err != nil {
 		return nil, err
 	}
 	pipBin := filepath.Join(BinDir(venvDir), "pip")
@@ -70,7 +71,7 @@ func Install(pkgs []model.Package, venvDir string, toolchainBins []string, out i
 		finish = report(strings.Join(refs, " "))
 	}
 
-	if err := run(pipBin, append([]string{"install"}, refs...), out, "pip install "+strings.Join(refs, " ")); err != nil {
+	if err := run(ctx, pipBin, append([]string{"install"}, refs...), out, "pip install "+strings.Join(refs, " ")); err != nil {
 		finish(false)
 		return nil, err
 	}
@@ -86,7 +87,7 @@ func Install(pkgs []model.Package, venvDir string, toolchainBins []string, out i
 
 // Uninstall removes the named packages from the venv (best effort). Used to GC
 // packages that were dropped from the config.
-func Uninstall(venvDir string, names []string, out io.Writer) error {
+func Uninstall(ctx context.Context, venvDir string, names []string, out io.Writer) error {
 	if len(names) == 0 {
 		return nil
 	}
@@ -97,7 +98,7 @@ func Uninstall(venvDir string, names []string, out io.Writer) error {
 	}
 
 	args := append([]string{"uninstall", "-y"}, names...)
-	return run(pipBin, args, out, "pip uninstall")
+	return run(ctx, pipBin, args, out, "pip uninstall")
 }
 
 // installedVersion returns the concrete installed version of a package via
@@ -113,7 +114,7 @@ func installedVersion(pipBin, name string) string {
 
 // ensureVenv creates the virtualenv with the given python if its bin/pip is not
 // already present.
-func ensureVenv(venvDir, python string, out io.Writer) error {
+func ensureVenv(ctx context.Context, venvDir, python string, out io.Writer) error {
 	if toolenv.IsExecutable(filepath.Join(BinDir(venvDir), "pip")) {
 		return nil
 	}
@@ -122,11 +123,12 @@ func ensureVenv(venvDir, python string, out io.Writer) error {
 		return err
 	}
 
-	return run(python, []string{"-m", "venv", venvDir}, out, "python -m venv")
+	return run(ctx, python, []string{"-m", "venv", venvDir}, out, "python -m venv")
 }
 
 // run executes a command, streaming combined output to out (also captured so a
-// failure can surface it), and returns a concise error on failure.
-func run(bin string, args []string, out io.Writer, what string) error {
-	return toolenv.Run(exec.Command(bin, args...), out, outputPrefix, what)
+// failure can surface it), and returns a concise error on failure. It is
+// cancellable via ctx (Ctrl+C during sync).
+func run(ctx context.Context, bin string, args []string, out io.Writer, what string) error {
+	return toolenv.Run(ctx, exec.Command(bin, args...), out, outputPrefix, what)
 }

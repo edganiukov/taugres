@@ -2,6 +2,7 @@ package mise
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,7 +43,7 @@ func TestInstallReturnsResolvedAndStreams(t *testing.T) {
 	// mise writes its raw output to the provided writer; line prefixing is the
 	// caller's responsibility (see internal/ui Reporter/LinePrefixer).
 	var out bytes.Buffer
-	installed, err := Install([]model.MiseTool{{Name: "node", Version: "22"}}, 0, false, &out, nil)
+	installed, err := Install(context.Background(), []model.MiseTool{{Name: "node", Version: "22"}}, 0, false, &out, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestInstallQuietWhenOutNil(t *testing.T) {
 	testutil.WriteExec(t, store, "node/22/bin/node", "#!/bin/sh\n")
 	fakeMise(t, store)
 
-	if _, err := Install([]model.MiseTool{{Name: "node", Version: "22"}}, 0, false, nil, nil); err != nil {
+	if _, err := Install(context.Background(), []model.MiseTool{{Name: "node", Version: "22"}}, 0, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -73,14 +74,14 @@ func TestInstallErrorsWithoutMise(t *testing.T) {
 	Binary = "definitely-not-a-real-mise-binary-xyz"
 	t.Cleanup(func() { Binary = old })
 
-	_, err := Install([]model.MiseTool{{Name: "node", Version: "22"}}, 0, false, nil, nil)
+	_, err := Install(context.Background(), []model.MiseTool{{Name: "node", Version: "22"}}, 0, false, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when mise is unavailable")
 	}
 }
 
 func TestInstallNoToolsIsNoop(t *testing.T) {
-	installed, err := Install(nil, 0, false, nil, nil)
+	installed, err := Install(context.Background(), nil, 0, false, nil, nil)
 	if err != nil || installed != nil {
 		t.Errorf("empty install should be a no-op, got %v err=%v", installed, err)
 	}

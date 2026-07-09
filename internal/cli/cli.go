@@ -3,9 +3,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 // Version is the tau version string.
@@ -18,6 +21,16 @@ type Env struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Wd     string // working directory
+	Ctx    context.Context
+}
+
+// ctx returns the environment's context, or context.Background() when unset (as
+// in tests). Long-running commands (sync installs) honor it so Ctrl+C aborts.
+func (e *Env) ctx() context.Context {
+	if e.Ctx != nil {
+		return e.Ctx
+	}
+	return context.Background()
 }
 
 // DefaultEnv builds an Env from the real process.
@@ -34,6 +47,15 @@ func DefaultEnv() *Env {
 
 // Main is the entry point; it returns a process exit code.
 func Main(e *Env) int {
+	// Cancel the environment context on Ctrl+C / SIGTERM so long-running work
+	// (tool installs during sync) stops promptly. Set only if the caller didn't
+	// provide one (tests pass their own or none).
+	if e.Ctx == nil {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		e.Ctx = ctx
+	}
+
 	if len(e.Args) == 0 {
 		printUsage(e.Stderr)
 		return 2

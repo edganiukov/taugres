@@ -2,6 +2,7 @@ package npm
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -39,7 +40,7 @@ func TestInstallIntoPrefixAndStreams(t *testing.T) {
 	npmDir := filepath.Join(testutil.TempWorkspace(t), ".taugres", "tools", "npm")
 
 	var out bytes.Buffer
-	_, err := Install([]model.Package{{Name: "typescript", Version: "5.6.2"}, {Name: "cowsay"}}, npmDir, []string{toolchain}, &out, nil)
+	_, err := Install(context.Background(), []model.Package{{Name: "typescript", Version: "5.6.2"}, {Name: "cowsay"}}, npmDir, []string{toolchain}, &out, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,14 +57,14 @@ func TestInstallIntoPrefixAndStreams(t *testing.T) {
 func TestInstallErrorsWithoutNpm(t *testing.T) {
 	// Empty toolchain + a PATH with no npm.
 	t.Setenv("PATH", t.TempDir())
-	_, err := Install([]model.Package{{Name: "cowsay"}}, t.TempDir(), nil, nil, nil)
+	_, err := Install(context.Background(), []model.Package{{Name: "cowsay"}}, t.TempDir(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when npm is unavailable")
 	}
 }
 
 func TestInstallNoPackagesIsNoop(t *testing.T) {
-	if _, err := Install(nil, t.TempDir(), nil, nil, nil); err != nil {
+	if _, err := Install(context.Background(), nil, t.TempDir(), nil, nil, nil); err != nil {
 		t.Errorf("empty install should be a no-op, got %v", err)
 	}
 }

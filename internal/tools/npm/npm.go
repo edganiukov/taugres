@@ -11,6 +11,7 @@
 package npm
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,7 +42,7 @@ func ref(p model.Package) string {
 // npmDir (each Package.Version is the exact spec to install), using npm/node
 // from the mise toolchain dirs. It returns each package's resolved concrete
 // version. When out is non-nil, npm's output is streamed live.
-func Install(pkgs []model.Package, npmDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
+func Install(ctx context.Context, pkgs []model.Package, npmDir string, toolchainBins []string, out io.Writer, report Reporter) (map[string]string, error) {
 	if len(pkgs) == 0 {
 		return nil, nil
 	}
@@ -67,7 +68,7 @@ func Install(pkgs []model.Package, npmDir string, toolchainBins []string, out io
 	}
 
 	args := append([]string{"install", "-g", "--prefix", npmDir}, refs...)
-	if err := run(npmExe, args, toolchainBins, out, "npm install "+strings.Join(refs, " ")); err != nil {
+	if err := run(ctx, npmExe, args, toolchainBins, out, "npm install "+strings.Join(refs, " ")); err != nil {
 		finish(false)
 		return nil, err
 	}
@@ -83,7 +84,7 @@ func Install(pkgs []model.Package, npmDir string, toolchainBins []string, out io
 
 // Uninstall removes the named packages from the npm prefix (best effort). Used
 // to GC packages dropped from the config.
-func Uninstall(npmDir string, names []string, toolchainBins []string, out io.Writer) error {
+func Uninstall(ctx context.Context, npmDir string, names []string, toolchainBins []string, out io.Writer) error {
 	if len(names) == 0 {
 		return nil
 	}
@@ -94,7 +95,7 @@ func Uninstall(npmDir string, names []string, toolchainBins []string, out io.Wri
 
 	npmExe := toolenv.Resolve(toolchainBins, "npm")
 	args := append([]string{"uninstall", "-g", "--prefix", npmDir}, names...)
-	return run(npmExe, args, toolchainBins, out, "npm uninstall")
+	return run(ctx, npmExe, args, toolchainBins, out, "npm uninstall")
 }
 
 // installedVersion reads a package's version from its installed package.json,
@@ -119,11 +120,11 @@ func installedVersion(npmDir, name string) string {
 // run executes npm, streaming combined output to out (also captured so a
 // failure can surface it). toolchainBins are prepended to the child's PATH so
 // npm's `#!/usr/bin/env node` shebang resolves the mise-provided node.
-func run(bin string, args []string, toolchainBins []string, out io.Writer, what string) error {
+func run(ctx context.Context, bin string, args []string, toolchainBins []string, out io.Writer, what string) error {
 	cmd := exec.Command(bin, args...)
 	if len(toolchainBins) > 0 {
 		p := strings.Join(toolchainBins, string(os.PathListSeparator))
 		cmd.Env = append(os.Environ(), "PATH="+p+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
-	return toolenv.Run(cmd, out, outputPrefix, what)
+	return toolenv.Run(ctx, cmd, out, outputPrefix, what)
 }
