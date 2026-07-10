@@ -138,10 +138,9 @@ and Deferred).
 
 Generated `activate.<shell>` sets env/PATH/aliases/functions and runs hooks,
 saving prior values into uniquely-prefixed helper variables. `deactivate.<shell>`
-restores them. Aliases intentionally take precedence while active: an existing
-alias/function of the same name is serialized, overwritten, and restored on deactivation.
-`shell.fn` collisions remain conservative: an existing function is kept and a
-warning is printed.
+restores them. Aliases and `shell.fn` functions intentionally take precedence
+while active: an existing definition of the same name is serialized,
+overwritten, and restored on deactivation.
 
 The shell hook tracks the active project. Entering a different project sources
 the previous project's deactivate script (which matches how it was activated),

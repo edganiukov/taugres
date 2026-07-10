@@ -65,10 +65,10 @@ func fishDeactivate(p *model.Plan) string {
 	fmt.Fprintln(w, "end")
 	fmt.Fprintf(w, "set -e %sPATH %sPATH__set\n\n", helperPrefix, helperPrefix)
 
-	// Remove project aliases and restore definitions they overwrote.
-	fmt.Fprintln(w, "# --- restore aliases ---")
-	for _, name := range sortedKeys(p.Aliases) {
-		guard := helperPrefix + "ALIAS_" + sanitizeVar(name)
+	// Restore in reverse activation order: functions first, then aliases.
+	fmt.Fprintln(w, "# --- restore functions ---")
+	for _, name := range funcNamesForShell(p, "fish") {
+		guard := helperPrefix + "FN_" + sanitizeVar(name)
 		definition := guard + "__definition"
 		present := guard + "__set"
 		fmt.Fprintf(w, "if test \"$%s\" = 1\n", guard)
@@ -81,11 +81,18 @@ func fishDeactivate(p *model.Plan) string {
 	}
 	fmt.Fprintln(w)
 
-	fmt.Fprintln(w, "# --- remove functions ---")
-	for _, name := range funcNamesForShell(p, "fish") {
-		guard := helperPrefix + "FN_" + sanitizeVar(name)
-		fmt.Fprintf(w, "if test \"$%s\" = 1; functions -e %s; end\n", guard, fishQuote(name))
-		fmt.Fprintf(w, "set -e %s\n", guard)
+	fmt.Fprintln(w, "# --- restore aliases ---")
+	for _, name := range sortedKeys(p.Aliases) {
+		guard := helperPrefix + "ALIAS_" + sanitizeVar(name)
+		definition := guard + "__definition"
+		present := guard + "__set"
+		fmt.Fprintf(w, "if test \"$%s\" = 1\n", guard)
+		fmt.Fprintf(w, "    functions -e %s\n", fishQuote(name))
+		fmt.Fprintf(w, "    if test \"$%s\" = 1\n", present)
+		fmt.Fprintf(w, "        printf '%%s\\n' \"$%s\" | source\n", definition)
+		fmt.Fprintln(w, "    end")
+		fmt.Fprintln(w, "end")
+		fmt.Fprintf(w, "set -e %s %s %s\n", guard, definition, present)
 	}
 	fmt.Fprintln(w)
 
@@ -212,16 +219,24 @@ func fishFunctions(w *strings.Builder, p *model.Plan) {
 		}
 
 		guard := helperPrefix + "FN_" + sanitizeVar(name)
-		fmt.Fprintf(w, "if functions -q %s\n", fishQuote(name))
-		fmt.Fprintf(w, "    printf 'tau: warning: function %%s already exists; skipping\\n' %s >&2\n", fishQuote(name))
-		fmt.Fprintln(w, "else")
-		if e.File != "" {
-			fmt.Fprintf(w, "    function %s; source %s $argv; end\n", name, fishQuote(e.File))
-		} else {
-			fmt.Fprintf(w, "    function %s\n%s\n    end\n", name, strings.Trim(e.Content, "\n"))
-		}
-		fmt.Fprintf(w, "    set -g %s 1\n", guard)
+		definition := guard + "__definition"
+		present := guard + "__set"
+		qn := fishQuote(name)
+		fmt.Fprintf(w, "if not set -q %s\n", guard)
+		fmt.Fprintf(w, "    if functions -q %s\n", qn)
+		fmt.Fprintf(w, "        set -g %s (functions %s | string collect)\n", definition, qn)
+		fmt.Fprintf(w, "        set -g %s 1\n", present)
+		fmt.Fprintln(w, "    else")
+		fmt.Fprintf(w, "        set -g %s 0\n", present)
+		fmt.Fprintln(w, "    end")
 		fmt.Fprintln(w, "end")
+		fmt.Fprintf(w, "functions -e %s 2>/dev/null\n", qn)
+		if e.File != "" {
+			fmt.Fprintf(w, "function %s; source %s $argv; end\n", name, fishQuote(e.File))
+		} else {
+			fmt.Fprintf(w, "function %s\n%s\nend\n", name, strings.Trim(e.Content, "\n"))
+		}
+		fmt.Fprintf(w, "set -g %s 1\n", guard)
 	}
 	fmt.Fprintln(w)
 }

@@ -872,7 +872,7 @@ echo "ACT DEMO_VAR=$DEMO_VAR"
 echo "ACT PYTHONPATH=${PYTHONPATH+set}"
 echo "ACT ROOT=$TAUGRES_PROJECT_ROOT"
 [ "${PATH%%:*}" = "` + dir + `/bin" ] && echo "ACT PATHHEAD=ok"
-[ "$(croot)" = "original-function" ] && echo "ACT croot=preserved"
+[ "$(croot; pwd)" = "` + dir + `" ] && echo "ACT croot=overwritten"
 alias ll | grep -q 'ls -lah' && echo "ACT alias=overwritten"
 source "` + gen + `/deactivate.bash"
 echo "DEA DEMO_VAR=$DEMO_VAR"
@@ -893,7 +893,7 @@ echo "DEA ACTIVE=${TAUGRES_ACTIVE:-unset}"
 		"ACT PYTHONPATH=", // unset -> ${PYTHONPATH+set} empty
 		"ACT ROOT=" + dir,
 		"ACT PATHHEAD=ok",
-		"ACT croot=preserved",
+		"ACT croot=overwritten",
 		"ACT alias=overwritten",
 		"DEA DEMO_VAR=original",
 		"DEA PYTHONPATH=/keep/me",

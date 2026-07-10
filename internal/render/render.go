@@ -142,7 +142,20 @@ func posixDeactivate(p *model.Plan, shell string) string {
 	fmt.Fprintln(w, "fi")
 	fmt.Fprintf(w, "unset %sPATH %sPATH__set\n\n", helperPrefix, helperPrefix)
 
-	// Remove project aliases and restore definitions they overwrote.
+	// Restore in reverse activation order: functions first, then aliases.
+	fmt.Fprintln(w, "# --- restore functions ---")
+	for _, name := range funcNamesForShell(p, shell) {
+		guard := helperPrefix + "FN_" + sanitizeVar(name)
+		definition := guard + "__definition"
+		present := guard + "__set"
+		fmt.Fprintf(w, "if [ \"${%s:-}\" = 1 ]; then\n", guard)
+		fmt.Fprintf(w, "  unset -f %s 2>/dev/null\n", shellQuoteBare(name))
+		fmt.Fprintf(w, "  if [ \"${%s:-}\" = 1 ]; then eval \"${%s}\"; fi\n", present, definition)
+		fmt.Fprintln(w, "fi")
+		fmt.Fprintf(w, "unset %s %s %s\n", guard, definition, present)
+	}
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "# --- restore aliases ---")
 	for _, name := range sortedKeys(p.Aliases) {
 		guard := helperPrefix + "ALIAS_" + sanitizeVar(name)
@@ -153,15 +166,6 @@ func posixDeactivate(p *model.Plan, shell string) string {
 		fmt.Fprintf(w, "  if [ \"${%s:-}\" = 1 ]; then eval \"alias ${%s}\"; fi\n", present, definition)
 		fmt.Fprintln(w, "fi")
 		fmt.Fprintf(w, "unset %s %s %s\n", guard, definition, present)
-	}
-	fmt.Fprintln(w)
-
-	// Remove functions that Taugres created.
-	fmt.Fprintln(w, "# --- remove functions ---")
-	for _, name := range funcNamesForShell(p, shell) {
-		guard := helperPrefix + "FN_" + sanitizeVar(name)
-		fmt.Fprintf(w, "if [ \"${%s:-}\" = 1 ]; then unset -f %s 2>/dev/null; fi\n", guard, shellQuoteBare(name))
-		fmt.Fprintf(w, "unset %s\n", guard)
 	}
 	fmt.Fprintln(w)
 
@@ -315,19 +319,26 @@ func renderFunctions(w *strings.Builder, p *model.Plan, shell string) {
 			continue
 		}
 		guard := helperPrefix + "FN_" + sanitizeVar(name)
-		fmt.Fprintf(w, "if typeset -f %s >/dev/null 2>&1; then\n", shellQuoteBare(name))
-		fmt.Fprintf(w, "  printf 'tau: warning: function %%s already exists; skipping\\n' %s >&2\n", shellQuote(name))
-		fmt.Fprintln(w, "else")
+		definition := guard + "__definition"
+		present := guard + "__set"
+		fmt.Fprintf(w, "if [ -z \"${%s+x}\" ]; then\n", guard)
+		fmt.Fprintf(w, "  if typeset -f %s >/dev/null 2>&1; then\n", shellQuoteBare(name))
+		fmt.Fprintf(w, "    %s=\"$(typeset -f %s)\"\n", definition, shellQuoteBare(name))
+		fmt.Fprintf(w, "    %s=1\n", present)
+		fmt.Fprintln(w, "  else")
+		fmt.Fprintf(w, "    %s=0\n", present)
+		fmt.Fprintln(w, "  fi")
+		fmt.Fprintln(w, "fi")
+		fmt.Fprintf(w, "unset -f %s 2>/dev/null\n", shellQuoteBare(name))
 		if e.File != "" {
 			// Body lives in a file, sourced with the caller's arguments.
-			fmt.Fprintf(w, "  %s() { source %s \"$@\"; }\n", name, shellQuote(e.File))
+			fmt.Fprintf(w, "%s() { source %s \"$@\"; }\n", name, shellQuote(e.File))
 		} else {
 			// Inline body embedded verbatim (shell ignores indentation), with
 			// surrounding blank lines trimmed.
-			fmt.Fprintf(w, "  %s() {\n%s\n}\n", name, strings.Trim(e.Content, "\n"))
+			fmt.Fprintf(w, "%s() {\n%s\n}\n", name, strings.Trim(e.Content, "\n"))
 		}
-		fmt.Fprintf(w, "  %s=1\n", guard)
-		fmt.Fprintln(w, "fi")
+		fmt.Fprintf(w, "%s=1\n", guard)
 	}
 	fmt.Fprintln(w)
 }
