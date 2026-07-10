@@ -78,12 +78,7 @@ func Install(ctx context.Context, pkgs []model.Package, venvDir string, toolchai
 	}
 	finish(true)
 
-	resolved := map[string]string{}
-	for _, p := range pkgs {
-		resolved[p.Name] = installedVersion(uvExe, venvPython, p.Name)
-	}
-
-	return resolved, nil
+	return installedVersions(ctx, uvExe, venvPython, pkgs), nil
 }
 
 // Uninstall removes the named packages from the venv (best effort). Used to GC
@@ -103,15 +98,22 @@ func Uninstall(ctx context.Context, venvDir string, names []string, toolchainBin
 	return run(ctx, uvExe, args, out, "uv pip uninstall")
 }
 
-// installedVersion returns the concrete installed version via `uv pip show`, or
-// "" if it cannot be determined.
-func installedVersion(uvExe, venvPython, name string) string {
-	out, err := exec.Command(uvExe, "pip", "show", "--python", venvPython, name).Output()
-	if err != nil {
-		return ""
+// installedVersions resolves all package versions with one uv process.
+func installedVersions(ctx context.Context, uvExe, venvPython string, pkgs []model.Package) map[string]string {
+	args := []string{"pip", "show", "--python", venvPython}
+	for _, pkg := range pkgs {
+		args = append(args, pkg.Name)
 	}
-
-	return toolenv.ScrapeVersion(out)
+	out, err := exec.CommandContext(ctx, uvExe, args...).Output()
+	if err != nil {
+		return map[string]string{}
+	}
+	found := toolenv.ScrapeVersions(out)
+	resolved := make(map[string]string, len(pkgs))
+	for _, pkg := range pkgs {
+		resolved[pkg.Name] = found[toolenv.NormalizePythonName(pkg.Name)]
+	}
+	return resolved
 }
 
 func run(ctx context.Context, bin string, args []string, out io.Writer, what string) error {

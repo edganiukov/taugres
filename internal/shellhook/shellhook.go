@@ -8,22 +8,25 @@ package shellhook
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+
+	"github.com/edganiukov/taugres/internal/shell"
 )
 
 // SupportedShells lists shells with hook support.
-var SupportedShells = []string{"bash", "zsh", "fish"}
+var SupportedShells = slices.Clone(shell.Supported)
 
 // Hook returns the shell hook script for the given shell. tauBin is the path to
 // the tau executable the shim invokes as `tau hook-env <shell>`.
-func Hook(shell, tauBin string) (string, error) {
-	switch shell {
-	case "bash", "zsh":
-		return posixHook(shell, tauBin), nil
-	case "fish":
+func Hook(shellName, tauBin string) (string, error) {
+	switch shellName {
+	case shell.Bash, shell.Zsh:
+		return posixHook(shellName, tauBin), nil
+	case shell.Fish:
 		return fishHook(tauBin), nil
 	default:
-		return "", fmt.Errorf("unsupported shell for hook: %q (supported: bash, zsh, fish)", shell)
+		return "", fmt.Errorf("unsupported shell for hook: %q (supported: bash, zsh, fish)", shellName)
 	}
 }
 
@@ -56,10 +59,13 @@ func SingleQuote(s string) string {
 const hookBody = `# tau shell hook (generated). Do not edit.
 _tau_find_config() {
   # Walk upward from $PWD to the nearest project.tg or workspace.tg directory.
+  # Assign a variable instead of using command substitution, which would create
+  # a subshell on every prompt.
   local dir="$PWD"
+  _TAU_FOUND_CONFIG=""
   while [ -n "$dir" ]; do
     if [ -f "$dir/project.tg" ] || [ -f "$dir/workspace.tg" ]; then
-      printf '%s\n' "$dir"
+      _TAU_FOUND_CONFIG="$dir"
       return 0
     fi
     [ "$dir" = "/" ] && break
@@ -70,8 +76,8 @@ _tau_find_config() {
 }
 
 _tau_hook() {
-  local proj
-  proj="$(_tau_find_config)"
+  local proj=""
+  if _tau_find_config; then proj="$_TAU_FOUND_CONFIG"; fi
   if [ -z "$proj" ]; then
     # Outside any project with nothing sourced (empty or applied-bit 0): nothing
     # to tear down, so spawn nothing.
@@ -80,7 +86,7 @@ _tau_hook() {
   # _TAU_APPLIED is set (unexported) by the eval'd output when THIS shell
   # sourced the activate script. A child shell inherits the exported token but
   # not this flag (or the aliases/functions), so hook-env re-activates there.
-  eval "$("$_TAU_BIN" hook-env "$_TAU_SHELL" "${_TAU_APPLIED:-}")"
+  eval "$("$_TAU_BIN" hook-env "$_TAU_SHELL" "${_TAU_APPLIED:-}" "$proj")"
 }
 `
 
@@ -88,7 +94,8 @@ const zshWiring = `
 _TAU_SHELL=zsh
 autoload -U add-zsh-hook 2>/dev/null
 if typeset -f add-zsh-hook >/dev/null 2>&1; then
-  add-zsh-hook chpwd _tau_hook
+  # precmd is sufficient: activation completes before the next command and
+  # avoids running tau twice for each cd (once at chpwd and again at precmd).
   add-zsh-hook precmd _tau_hook
 fi
 # Run once for the current directory.

@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/edganiukov/taugres/internal/atomicfile"
 )
 
 // FileName is the committed lockfile name at the project root.
@@ -28,11 +30,12 @@ type Entry struct {
 
 // File is the parsed lockfile.
 type File struct {
-	LockfileVersion int              `json:"lockfileVersion"`
-	Mise            map[string]Entry `json:"mise,omitempty"`
-	Pip             map[string]Entry `json:"pip,omitempty"`
-	Npm             map[string]Entry `json:"npm,omitempty"`
-	Uv              map[string]Entry `json:"uv,omitempty"`
+	LockfileVersion int                         `json:"lockfileVersion"`
+	Mise            map[string]Entry            `json:"mise,omitempty"`
+	Pip             map[string]Entry            `json:"pip,omitempty"`
+	Npm             map[string]Entry            `json:"npm,omitempty"`
+	Uv              map[string]Entry            `json:"uv,omitempty"`
+	Managers        map[string]map[string]Entry `json:"managers,omitempty"`
 }
 
 // Path returns the lockfile path for a project root.
@@ -67,6 +70,9 @@ func Load(projectRoot string) (*File, error) {
 	if f.Uv == nil {
 		f.Uv = map[string]Entry{}
 	}
+	if f.Managers == nil {
+		f.Managers = map[string]map[string]Entry{}
+	}
 
 	return &f, nil
 }
@@ -79,7 +85,33 @@ func New() *File {
 		Pip:             map[string]Entry{},
 		Npm:             map[string]Entry{},
 		Uv:              map[string]Entry{},
+		Managers:        map[string]map[string]Entry{},
 	}
+}
+
+// Section returns the lock entries for a manager. The original built-in fields
+// retain the version-1 JSON layout; additional statically-registered managers
+// use the generic managers object without requiring another File field.
+func (f *File) Section(manager string) map[string]Entry {
+	switch manager {
+	case "mise":
+		return f.Mise
+	case "pip":
+		return f.Pip
+	case "npm":
+		return f.Npm
+	case "uv":
+		return f.Uv
+	}
+	if f.Managers == nil {
+		f.Managers = map[string]map[string]Entry{}
+	}
+	section := f.Managers[manager]
+	if section == nil {
+		section = map[string]Entry{}
+		f.Managers[manager] = section
+	}
+	return section
 }
 
 // Save writes the lockfile to the project root.
@@ -91,7 +123,7 @@ func (f *File) Save(projectRoot string) error {
 	}
 
 	data = append(data, '\n')
-	return os.WriteFile(Path(projectRoot), data, 0o644)
+	return atomicfile.Write(Path(projectRoot), data, 0o644)
 }
 
 // InstallVersion decides which version to install for a tool, given its current

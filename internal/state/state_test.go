@@ -16,9 +16,10 @@ func TestManifestRoundTrip(t *testing.T) {
 	cfg := filepath.Join(dir, "workspace.tg")
 
 	m := &Manifest{
-		Inputs:   map[string]string{cfg: "abc", filepath.Join(dir, "mod.tg"): "def"},
-		ToolDirs: []string{"/store/node/1/bin"},
-		Probes:   []model.Probe{{Kind: "exists", Arg: "/x", Result: "1"}, {Kind: "which", Arg: "go", Result: "/usr/bin/go"}},
+		Inputs:      map[string]string{cfg: "abc", filepath.Join(dir, "mod.tg"): "def"},
+		ToolDirs:    []string{"/store/node/1/bin"},
+		ManagerDirs: map[string][]string{"mise": {"/store/node/1/bin"}},
+		Probes:      []model.Probe{{Kind: "exists", Arg: "/x", Result: "1"}, {Kind: "which", Arg: "go", Result: "/usr/bin/go"}},
 	}
 	if err := m.Write(stateDir); err != nil {
 		t.Fatal(err)
@@ -32,6 +33,9 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if len(got.ToolDirs) != 1 || got.ToolDirs[0] != "/store/node/1/bin" {
 		t.Errorf("tooldirs round trip mismatch: %+v", got.ToolDirs)
+	}
+	if dirs := got.ManagerDirs["mise"]; len(dirs) != 1 || dirs[0] != "/store/node/1/bin" {
+		t.Errorf("manager dirs round trip mismatch: %+v", got.ManagerDirs)
 	}
 	if len(got.Probes) != 2 || got.Probes[1].Result != "/usr/bin/go" {
 		t.Errorf("probes round trip mismatch: %+v", got.Probes)
@@ -169,5 +173,72 @@ func TestNeedsSync(t *testing.T) {
 	}
 	if need, _ := NeedsSync(stateDir, cfg); !need {
 		t.Error("expected needs-sync after tool dir removed")
+	}
+}
+
+func TestNeedsSyncMigratesLegacyManifest(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	cfg := testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\n")
+	stateDir := filepath.Join(dir, ".taugres")
+	if err := os.MkdirAll(GenDir(stateDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ManifestPath(stateDir), []byte("input:hash:"+cfg+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if need, _ := NeedsSync(stateDir, cfg); !need {
+		t.Error("legacy manifest should trigger a one-time migration sync")
+	}
+}
+
+func TestNeedsSyncDetectsBackdatedEdit(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	cfg := testutil.WriteFile(t, dir, "workspace.tg", "project(\"old\")\n")
+	stateDir := filepath.Join(dir, ".taugres")
+	hash, err := HashFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Manifest{Inputs: map[string]string{cfg: hash}}
+	if err := m.Write(stateDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(cfg, []byte("project(\"new\")\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Unix(946684800, 0)
+	if err := os.Chtimes(cfg, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if need, _ := NeedsSync(stateDir, cfg); !need {
+		t.Error("expected a backdated content edit to trigger sync")
+	}
+}
+
+func TestInspectHookDetectsMissingScript(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	cfg := testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\n")
+	stateDir := filepath.Join(dir, ".taugres")
+	m := &Manifest{Inputs: map[string]string{cfg: ""}}
+	if err := m.Write(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, dir, ".taugres/gen/deactivate.bash", "x")
+	if inspection := InspectHook(stateDir, cfg, "bash"); !inspection.NeedsSync {
+		t.Error("missing activation script should trigger sync")
+	}
+}
+
+func TestNeedsSyncPendingManager(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	cfg := testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\n")
+	stateDir := filepath.Join(dir, ".taugres")
+	m := &Manifest{Inputs: map[string]string{cfg: ""}, PendingManagers: []string{"mise"}}
+	if err := m.Write(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if need, _ := NeedsSync(stateDir, cfg); !need {
+		t.Error("expected an incomplete manager to keep the manifest stale")
 	}
 }

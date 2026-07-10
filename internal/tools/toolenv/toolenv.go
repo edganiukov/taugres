@@ -7,7 +7,6 @@
 package toolenv
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -22,24 +21,29 @@ import (
 
 // interruptGrace is how long a child gets to exit after SIGINT before it is
 // force-killed when the context is cancelled (Ctrl+C during sync).
-const interruptGrace = 3 * time.Second
+const (
+	interruptGrace  = 3 * time.Second
+	outputTailLimit = 128 << 10
+)
 
 // Run executes cmd, streaming its combined output to out (when non-nil) while
-// also capturing it. On failure it returns an error naming `what`; when out was
-// nil (quiet mode) the captured output is included, prefixed, so it is not lost.
+// retaining only a bounded diagnostic tail. On failure it returns an error
+// naming `what`; in quiet mode the captured tail is included and prefixed.
 // Shared by the mise/pip/npm integrations.
 //
 // If ctx is cancelled (Ctrl+C), the child is sent SIGINT, then SIGKILL after a
 // short grace period, and ctx.Err() is returned — so a long install stops
 // promptly instead of running to completion.
 func Run(ctx context.Context, cmd *exec.Cmd, out io.Writer, prefix, what string) error {
-	var captured bytes.Buffer
-	w := io.Writer(&captured)
-	if out != nil {
-		w = io.MultiWriter(&captured, out)
+	captured := newTailBuffer(outputTailLimit)
+	streamed := out != nil
+	w := io.Writer(captured)
+	if streamed {
+		w = io.MultiWriter(captured, out)
 	}
 	cmd.Stdout = w
 	cmd.Stderr = w
+	prepareCommand(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("%s: %w", what, err)
@@ -50,17 +54,17 @@ func Run(ctx context.Context, cmd *exec.Cmd, out io.Writer, prefix, what string)
 
 	select {
 	case <-ctx.Done():
-		_ = cmd.Process.Signal(os.Interrupt)
+		_ = interruptCommand(cmd)
 		select {
 		case <-done:
 		case <-time.After(interruptGrace):
-			_ = cmd.Process.Kill()
+			_ = killCommand(cmd)
 			<-done
 		}
 		return ctx.Err()
 	case err := <-done:
 		if err != nil {
-			if out != nil {
+			if streamed {
 				return fmt.Errorf("%s failed", what)
 			}
 			if msg := strings.TrimSpace(captured.String()); msg != "" {
@@ -70,6 +74,40 @@ func Run(ctx context.Context, cmd *exec.Cmd, out io.Writer, prefix, what string)
 		}
 		return nil
 	}
+}
+
+// tailBuffer retains only the most recent bytes written. Tool managers can be
+// extremely noisy, so failures stay diagnosable without retaining unbounded
+// subprocess output in memory.
+type tailBuffer struct {
+	buf []byte
+	max int
+}
+
+func newTailBuffer(max int) *tailBuffer {
+	return &tailBuffer{buf: make([]byte, 0, max), max: max}
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if b.max <= 0 {
+		return n, nil
+	}
+	if len(p) >= b.max {
+		b.buf = append(b.buf[:0], p[len(p)-b.max:]...)
+		return n, nil
+	}
+	overflow := len(b.buf) + len(p) - b.max
+	if overflow > 0 {
+		copy(b.buf, b.buf[overflow:])
+		b.buf = b.buf[:len(b.buf)-overflow]
+	}
+	b.buf = append(b.buf, p...)
+	return n, nil
+}
+
+func (b *tailBuffer) String() string {
+	return string(b.buf)
 }
 
 // Reporter observes install steps. It is called with a package/tool reference
@@ -117,4 +155,39 @@ func ScrapeVersion(out []byte) string {
 		}
 	}
 	return ""
+}
+
+// ScrapeVersions extracts all Name/Version pairs from one batched pip/uv show
+// response. Keys are normalized using Python package-name equivalence rules.
+func ScrapeVersions(out []byte) map[string]string {
+	versions := map[string]string{}
+	name := ""
+	for line := range strings.SplitSeq(string(out), "\n") {
+		switch {
+		case strings.HasPrefix(line, "Name:"):
+			name = NormalizePythonName(strings.TrimSpace(strings.TrimPrefix(line, "Name:")))
+		case strings.HasPrefix(line, "Version:") && name != "":
+			versions[name] = strings.TrimSpace(strings.TrimPrefix(line, "Version:"))
+			name = ""
+		}
+	}
+	return versions
+}
+
+// NormalizePythonName applies PEP 503 name normalization.
+func NormalizePythonName(name string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(name) {
+		if r == '-' || r == '_' || r == '.' {
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+			continue
+		}
+		lastDash = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }

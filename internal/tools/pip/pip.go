@@ -77,12 +77,7 @@ func Install(ctx context.Context, pkgs []model.Package, venvDir string, toolchai
 	}
 	finish(true)
 
-	resolved := map[string]string{}
-	for _, p := range pkgs {
-		resolved[p.Name] = installedVersion(pipBin, p.Name)
-	}
-
-	return resolved, nil
+	return installedVersions(ctx, pipBin, pkgs), nil
 }
 
 // Uninstall removes the named packages from the venv (best effort). Used to GC
@@ -101,15 +96,22 @@ func Uninstall(ctx context.Context, venvDir string, names []string, out io.Write
 	return run(ctx, pipBin, args, out, "pip uninstall")
 }
 
-// installedVersion returns the concrete installed version of a package via
-// `pip show`, or "" if it cannot be determined.
-func installedVersion(pipBin, name string) string {
-	out, err := exec.Command(pipBin, "show", name).Output()
-	if err != nil {
-		return ""
+// installedVersions resolves all package versions with one pip process.
+func installedVersions(ctx context.Context, pipBin string, pkgs []model.Package) map[string]string {
+	args := []string{"show"}
+	for _, pkg := range pkgs {
+		args = append(args, pkg.Name)
 	}
-
-	return toolenv.ScrapeVersion(out)
+	out, err := exec.CommandContext(ctx, pipBin, args...).Output()
+	if err != nil {
+		return map[string]string{}
+	}
+	found := toolenv.ScrapeVersions(out)
+	resolved := make(map[string]string, len(pkgs))
+	for _, pkg := range pkgs {
+		resolved[pkg.Name] = found[toolenv.NormalizePythonName(pkg.Name)]
+	}
+	return resolved
 }
 
 // ensureVenv creates the virtualenv with the given python if its bin/pip is not
@@ -126,8 +128,8 @@ func ensureVenv(ctx context.Context, venvDir, python string, out io.Writer) erro
 	return run(ctx, python, []string{"-m", "venv", venvDir}, out, "python -m venv")
 }
 
-// run executes a command, streaming combined output to out (also captured so a
-// failure can surface it), and returns a concise error on failure. It is
+// run executes a command, streaming combined output to out while retaining a
+// bounded diagnostic tail, and returns a concise error on failure. It is
 // cancellable via ctx (Ctrl+C during sync).
 func run(ctx context.Context, bin string, args []string, out io.Writer, what string) error {
 	return toolenv.Run(ctx, exec.Command(bin, args...), out, outputPrefix, what)

@@ -117,8 +117,8 @@ func installedVersion(npmDir, name string) string {
 	return pkg.Version
 }
 
-// run executes npm, streaming combined output to out (also captured so a
-// failure can surface it). toolchainBins are prepended to the child's PATH so
+// run executes npm, streaming combined output to out while retaining a bounded
+// diagnostic tail. toolchainBins are prepended to the child's PATH so
 // npm's `#!/usr/bin/env node` shebang resolves the mise-provided node.
 func run(ctx context.Context, bin string, args []string, toolchainBins []string, out io.Writer, what string) error {
 	cmd := exec.Command(bin, args...)

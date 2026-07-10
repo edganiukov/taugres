@@ -65,12 +65,19 @@ func fishDeactivate(p *model.Plan) string {
 	fmt.Fprintln(w, "end")
 	fmt.Fprintf(w, "set -e %sPATH %sPATH__set\n\n", helperPrefix, helperPrefix)
 
-	// Remove aliases/functions that Taugres created.
-	fmt.Fprintln(w, "# --- remove aliases ---")
+	// Remove project aliases and restore definitions they overwrote.
+	fmt.Fprintln(w, "# --- restore aliases ---")
 	for _, name := range sortedKeys(p.Aliases) {
 		guard := helperPrefix + "ALIAS_" + sanitizeVar(name)
-		fmt.Fprintf(w, "if test \"$%s\" = 1; functions -e %s; end\n", guard, fishQuote(name))
-		fmt.Fprintf(w, "set -e %s\n", guard)
+		definition := guard + "__definition"
+		present := guard + "__set"
+		fmt.Fprintf(w, "if test \"$%s\" = 1\n", guard)
+		fmt.Fprintf(w, "    functions -e %s\n", fishQuote(name))
+		fmt.Fprintf(w, "    if test \"$%s\" = 1\n", present)
+		fmt.Fprintf(w, "        printf '%%s\\n' \"$%s\" | source\n", definition)
+		fmt.Fprintln(w, "    end")
+		fmt.Fprintln(w, "end")
+		fmt.Fprintf(w, "set -e %s %s %s\n", guard, definition, present)
 	}
 	fmt.Fprintln(w)
 
@@ -173,9 +180,18 @@ func fishAliases(w *strings.Builder, p *model.Plan) {
 	fmt.Fprintln(w, "# --- aliases ---")
 	for _, name := range sortedKeys(p.Aliases) {
 		guard := helperPrefix + "ALIAS_" + sanitizeVar(name)
+		definition := guard + "__definition"
+		present := guard + "__set"
 		qn := fishQuote(name)
-		// The project's aliases win: always (re)define them; deactivation removes
-		// them. Re-defining is what lets reactivation refresh a stale definition.
+		fmt.Fprintf(w, "if not set -q %s\n", guard)
+		fmt.Fprintf(w, "    if functions -q %s\n", qn)
+		fmt.Fprintf(w, "        set -g %s (functions %s | string collect)\n", definition, qn)
+		fmt.Fprintf(w, "        set -g %s 1\n", present)
+		fmt.Fprintln(w, "    else")
+		fmt.Fprintf(w, "        set -g %s 0\n", present)
+		fmt.Fprintln(w, "    end")
+		fmt.Fprintln(w, "end")
+		fmt.Fprintf(w, "functions -e %s 2>/dev/null\n", qn)
 		fmt.Fprintf(w, "alias %s %s\n", qn, fishQuote(p.Aliases[name]))
 		fmt.Fprintf(w, "set -g %s 1\n", guard)
 	}
@@ -196,14 +212,16 @@ func fishFunctions(w *strings.Builder, p *model.Plan) {
 		}
 
 		guard := helperPrefix + "FN_" + sanitizeVar(name)
-		// The project's functions win: always (re)define them; deactivation
-		// removes them. Re-defining lets reactivation refresh a stale definition.
+		fmt.Fprintf(w, "if functions -q %s\n", fishQuote(name))
+		fmt.Fprintf(w, "    printf 'tau: warning: function %%s already exists; skipping\\n' %s >&2\n", fishQuote(name))
+		fmt.Fprintln(w, "else")
 		if e.File != "" {
-			fmt.Fprintf(w, "function %s; source %s $argv; end\n", name, fishQuote(e.File))
+			fmt.Fprintf(w, "    function %s; source %s $argv; end\n", name, fishQuote(e.File))
 		} else {
-			fmt.Fprintf(w, "function %s\n%s\nend\n", name, strings.Trim(e.Content, "\n"))
+			fmt.Fprintf(w, "    function %s\n%s\n    end\n", name, strings.Trim(e.Content, "\n"))
 		}
-		fmt.Fprintf(w, "set -g %s 1\n", guard)
+		fmt.Fprintf(w, "    set -g %s 1\n", guard)
+		fmt.Fprintln(w, "end")
 	}
 	fmt.Fprintln(w)
 }

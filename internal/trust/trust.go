@@ -17,6 +17,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/edganiukov/taugres/internal/atomicfile"
 )
 
 // record is the on-disk trust marker for a config path.
@@ -73,7 +75,7 @@ func Allow(configPath string) error {
 	}
 
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o600)
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // IsAllowed reports whether the given config path has been trusted.

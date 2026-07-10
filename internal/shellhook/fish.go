@@ -25,9 +25,10 @@ func FishSingleQuote(s string) string {
 const fishHookBody = `# tau shell hook (generated). Do not edit.
 function _tau_find_config
     set -l dir $PWD
+    set -g _TAU_FOUND_CONFIG ''
     while test -n "$dir"
         if test -f "$dir/project.tg"; or test -f "$dir/workspace.tg"
-            echo $dir
+            set -g _TAU_FOUND_CONFIG $dir
             return 0
         end
         test "$dir" = "/"; and break
@@ -38,7 +39,10 @@ function _tau_find_config
 end
 
 function _tau_hook --on-event fish_prompt
-    set -l proj (_tau_find_config)
+    set -l proj ''
+    if _tau_find_config
+        set proj $_TAU_FOUND_CONFIG
+    end
     if test -z "$proj"
         # Outside any project with nothing sourced (empty or applied-bit 0):
         # nothing to tear down, so spawn nothing.
@@ -49,7 +53,7 @@ function _tau_hook --on-event fish_prompt
     # _TAU_APPLIED is set (unexported) by the sourced output when THIS shell
     # sourced the activate script; a child shell inherits the exported token
     # but not this flag, so hook-env re-activates there.
-    $_TAU_BIN hook-env fish "$_TAU_APPLIED" | source
+    $_TAU_BIN hook-env fish "$_TAU_APPLIED" "$proj" | source
 end
 
 # Run once for the current directory.

@@ -21,6 +21,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	f := New()
 	f.Mise["node"] = Entry{Requested: "22", Resolved: "22.11.0"}
 	f.Pip["rich"] = Entry{Requested: "", Resolved: "13.9.4"}
+	f.Section("cargo")["ripgrep"] = Entry{Requested: "", Resolved: "14.1.1"}
 	if err := f.Save(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -36,6 +37,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if got.Pip["rich"].Resolved != "13.9.4" {
 		t.Errorf("pip entry = %+v", got.Pip["rich"])
+	}
+	if got.Section("cargo")["ripgrep"].Resolved != "14.1.1" {
+		t.Errorf("generic manager entry = %+v", got.Section("cargo")["ripgrep"])
 	}
 }
 

@@ -34,13 +34,16 @@ func TestHookDelegatesToHookEnv(t *testing.T) {
 	}
 }
 
-func TestHookZshUsesChpwd(t *testing.T) {
+func TestHookZshRunsOnceBeforePrompt(t *testing.T) {
 	out, err := Hook("zsh", "tau")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "add-zsh-hook chpwd _tau_hook") {
-		t.Errorf("zsh hook should register a chpwd hook:\n%s", out)
+	if !strings.Contains(out, "add-zsh-hook precmd _tau_hook") {
+		t.Errorf("zsh hook should register a precmd hook:\n%s", out)
+	}
+	if strings.Contains(out, "add-zsh-hook chpwd _tau_hook") {
+		t.Errorf("zsh hook should not run twice for a directory change:\n%s", out)
 	}
 }
 
@@ -62,13 +65,26 @@ func TestHookFishUsesPromptEvent(t *testing.T) {
 	for _, want := range []string{
 		"set -g _TAU_BIN '/usr/local/bin/tau'",
 		"function _tau_hook --on-event fish_prompt",
-		`hook-env fish "$_TAU_APPLIED" | source`,
+		`hook-env fish "$_TAU_APPLIED" "$proj" | source`,
 		"_tau_find_config",
 		"TAUGRES_HOOK",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("fish hook missing %q", want)
 		}
+	}
+}
+
+func TestHookAvoidsConfigCommandSubstitution(t *testing.T) {
+	out, err := Hook("bash", "tau")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, `proj="$(_tau_find_config)"`) {
+		t.Errorf("config discovery should not use a prompt-time subshell:\n%s", out)
+	}
+	if !strings.Contains(out, `hook-env "$_TAU_SHELL" "${_TAU_APPLIED:-}" "$proj"`) {
+		t.Errorf("hook should pass its discovery result to hook-env:\n%s", out)
 	}
 }
 

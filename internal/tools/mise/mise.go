@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/edganiukov/taugres/internal/model"
 	"github.com/edganiukov/taugres/internal/tools/toolenv"
@@ -44,8 +45,8 @@ func ref(t model.MiseTool) string {
 // install runs `mise install ref...` for all tools in one command, so mise can
 // resolve and download them in parallel. jobs caps that parallelism (--jobs);
 // <= 0 leaves it to mise. When out is non-nil, mise's raw output is written to
-// it live (the caller prefixes lines); it is also captured so a failure can
-// surface the output in the error.
+// it live (the caller prefixes lines); a bounded tail is retained so quiet
+// failures can surface diagnostics.
 func install(ctx context.Context, refs []string, jobs int, force bool, out io.Writer) error {
 	args := []string{"install"}
 	if force {
@@ -98,10 +99,15 @@ func binDir(install, name string) string {
 // version to look up (a locked/resolved version, a pin, or "" for the active
 // one). It runs mise, so it belongs to sync, never activation.
 func ToolBinDir(name, version string) (string, error) {
+	return ToolBinDirContext(context.Background(), name, version)
+}
+
+// ToolBinDirContext is ToolBinDir with cancellation for sync/exec resolution.
+func ToolBinDirContext(ctx context.Context, name, version string) (string, error) {
 	if !Available() {
 		return "", fmt.Errorf("mise.where(%q) needs mise — install it with `curl https://mise.run | sh` (https://mise.jdx.dev)", name)
 	}
-	dir, err := where(model.MiseTool{Name: name, Version: version})
+	dir, err := where(ctx, model.MiseTool{Name: name, Version: version})
 	if err != nil {
 		return "", err
 	}
@@ -109,8 +115,8 @@ func ToolBinDir(name, version string) (string, error) {
 }
 
 // where returns the install directory for a tool via `mise where`.
-func where(t model.MiseTool) (string, error) {
-	out, err := exec.Command(Binary, "where", ref(t)).Output()
+func where(ctx context.Context, t model.MiseTool) (string, error) {
+	out, err := exec.CommandContext(ctx, Binary, "where", ref(t)).Output()
 	if err != nil {
 		return "", fmt.Errorf("mise where %s: %w", ref(t), err)
 	}
@@ -169,21 +175,43 @@ func Install(ctx context.Context, tools []model.MiseTool, jobs int, force bool, 
 		}
 	}
 
-	// Resolve whatever actually installed; report the rest as failures without
-	// discarding the successes.
+	// Resolve whatever actually installed. `mise where` calls are independent,
+	// so run them concurrently (bounded by the configured install parallelism)
+	// while preserving declaration order in the result.
+	resolved := make([]Installed, len(tools))
+	found := make([]bool, len(tools))
+	limit := jobs
+	if limit <= 0 || limit > len(tools) {
+		limit = len(tools)
+	}
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for i, tool := range tools {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			dir, err := where(ctx, tool)
+			if err != nil {
+				return
+			}
+			resolved[i] = Installed{
+				Name:     tool.Name,
+				Resolved: filepath.Base(dir), // mise stores installs as <tool>/<version>
+				BinDir:   binDir(dir, tool.Name),
+			}
+			found[i] = true
+		})
+	}
+	wg.Wait()
+
 	var installed []Installed
 	var missing []string
-	for _, t := range tools {
-		dir, err := where(t)
-		if err != nil {
-			missing = append(missing, ref(t))
-			continue
+	for i, tool := range tools {
+		if found[i] {
+			installed = append(installed, resolved[i])
+		} else {
+			missing = append(missing, ref(tool))
 		}
-		installed = append(installed, Installed{
-			Name:     t.Name,
-			Resolved: filepath.Base(dir), // mise stores installs as <tool>/<version>
-			BinDir:   binDir(dir, t.Name),
-		})
 	}
 
 	finish(len(missing) == 0)

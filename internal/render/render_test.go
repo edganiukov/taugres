@@ -7,13 +7,13 @@ import (
 	"github.com/edganiukov/taugres/internal/model"
 )
 
-func basePlan() *model.Plan {
+func basePlan() *model.ResolvedPlan {
 	p := model.NewPlan()
 	p.RepoRoot = "/repo"
 	p.ProjectRoot = "/repo"
 	p.ConfigPath = "/repo/workspace.tg"
 	p.StateDir = "/repo/.taugres"
-	return p
+	return model.ResolvePlan(p)
 }
 
 func TestActivateSetsBuiltins(t *testing.T) {
@@ -142,6 +142,12 @@ func TestHooksRenderedForShell(t *testing.T) {
 	}
 	if strings.Contains(fish, "mkdir -p .cache") {
 		t.Errorf("fish activate should not include a bash-only hook:\n%s", fish)
+	}
+}
+
+func TestAliasStateVariablesDoNotCollide(t *testing.T) {
+	if sanitizeVar("a-b") == sanitizeVar("a_b") {
+		t.Fatal("distinct alias names produced the same state variable")
 	}
 }
 

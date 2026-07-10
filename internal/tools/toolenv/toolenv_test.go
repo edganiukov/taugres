@@ -32,3 +32,24 @@ func TestRunSuccess(t *testing.T) {
 		t.Errorf("Run(true) = %v, want nil", err)
 	}
 }
+
+func TestScrapeVersions(t *testing.T) {
+	out := []byte("Name: Foo_Bar\nVersion: 1.2.3\n---\nName: baz\nVersion: 4\n")
+	versions := ScrapeVersions(out)
+	if versions["foo-bar"] != "1.2.3" || versions["baz"] != "4" {
+		t.Fatalf("versions = %+v", versions)
+	}
+}
+
+func TestTailBufferIsBounded(t *testing.T) {
+	b := newTailBuffer(5)
+	_, _ = b.Write([]byte("abc"))
+	_, _ = b.Write([]byte("defg"))
+	if got := b.String(); got != "cdefg" {
+		t.Fatalf("tail = %q, want %q", got, "cdefg")
+	}
+	_, _ = b.Write([]byte("0123456789"))
+	if got := b.String(); got != "56789" {
+		t.Fatalf("large tail = %q, want %q", got, "56789")
+	}
+}

@@ -21,7 +21,9 @@ func TestReporterStreamVerbosePrefixesLines(t *testing.T) {
 func TestReporterStreamQuietOnNonTerminal(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(&buf, false) // default mode, non-terminal buffer
-	r.Stream("mise: ").Write([]byte("noise\n"))
+	if w := r.Stream("mise: "); w != nil {
+		t.Fatalf("quiet stream = %T, want nil", w)
+	}
 	r.Done()
 	if buf.Len() != 0 {
 		t.Errorf("expected quiet default mode on non-terminal, got %q", buf.String())

@@ -240,7 +240,7 @@ var (
 
 // builtTau builds the tau binary once and returns its path, skipping the test
 // if the go toolchain is unavailable or the build fails.
-func builtTau(t *testing.T) string {
+func builtTau(t testing.TB) string {
 	t.Helper()
 	tauBinOnce.Do(func() {
 		if _, err := exec.LookPath("go"); err != nil {
@@ -864,18 +864,22 @@ shell.fn("croot", shells = ["bash", "zsh"], file = "//bin/croot.sh")
 set -e
 export PYTHONPATH="/keep/me"
 export DEMO_VAR="original"
+alias ll='echo original-alias'
+croot() { echo original-function; }
 ORIG_PATH="$PATH"
 source "` + gen + `/activate.bash"
 echo "ACT DEMO_VAR=$DEMO_VAR"
 echo "ACT PYTHONPATH=${PYTHONPATH+set}"
 echo "ACT ROOT=$TAUGRES_PROJECT_ROOT"
 [ "${PATH%%:*}" = "` + dir + `/bin" ] && echo "ACT PATHHEAD=ok"
-type croot >/dev/null 2>&1 && echo "ACT croot=ok"
+[ "$(croot)" = "original-function" ] && echo "ACT croot=preserved"
+alias ll | grep -q 'ls -lah' && echo "ACT alias=overwritten"
 source "` + gen + `/deactivate.bash"
 echo "DEA DEMO_VAR=$DEMO_VAR"
 echo "DEA PYTHONPATH=$PYTHONPATH"
 [ "$PATH" = "$ORIG_PATH" ] && echo "DEA PATH=restored"
-type croot >/dev/null 2>&1 || echo "DEA croot=gone"
+[ "$(croot)" = "original-function" ] && echo "DEA croot=preserved"
+alias ll | grep -q original-alias && echo "DEA alias=preserved"
 echo "DEA ACTIVE=${TAUGRES_ACTIVE:-unset}"
 `
 	out, err := exec.Command(bash, "--noprofile", "--norc", "-c", script).CombinedOutput()
@@ -889,11 +893,13 @@ echo "DEA ACTIVE=${TAUGRES_ACTIVE:-unset}"
 		"ACT PYTHONPATH=", // unset -> ${PYTHONPATH+set} empty
 		"ACT ROOT=" + dir,
 		"ACT PATHHEAD=ok",
-		"ACT croot=ok",
+		"ACT croot=preserved",
+		"ACT alias=overwritten",
 		"DEA DEMO_VAR=original",
 		"DEA PYTHONPATH=/keep/me",
 		"DEA PATH=restored",
-		"DEA croot=gone",
+		"DEA croot=preserved",
+		"DEA alias=preserved",
 		"DEA ACTIVE=unset",
 	}
 	for _, w := range wants {

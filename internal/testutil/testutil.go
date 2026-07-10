@@ -10,7 +10,7 @@ import (
 
 // TempWorkspace creates a temporary directory and returns its path. It is
 // removed automatically at test end.
-func TempWorkspace(t *testing.T) string {
+func TempWorkspace(t testing.TB) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "tau-test-*")
 	if err != nil {
@@ -26,7 +26,7 @@ func TempWorkspace(t *testing.T) string {
 }
 
 // WriteFile writes content to a path relative to dir, creating parents.
-func WriteFile(t *testing.T, dir, rel, content string) string {
+func WriteFile(t testing.TB, dir, rel, content string) string {
 	t.Helper()
 	p := filepath.Join(dir, rel)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -39,7 +39,7 @@ func WriteFile(t *testing.T, dir, rel, content string) string {
 }
 
 // WriteExec writes an executable file (e.g. a bin/ command).
-func WriteExec(t *testing.T, dir, rel, content string) string {
+func WriteExec(t testing.TB, dir, rel, content string) string {
 	t.Helper()
 	p := WriteFile(t, dir, rel, content)
 	if err := os.Chmod(p, 0o755); err != nil {

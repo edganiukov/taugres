@@ -3,34 +3,27 @@ package cli
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"sort"
-	"strconv"
 	"strings"
-	"sync"
 
+	"github.com/edganiukov/taugres/internal/atomicfile"
 	"github.com/edganiukov/taugres/internal/config"
 	"github.com/edganiukov/taugres/internal/discover"
+	"github.com/edganiukov/taugres/internal/environment"
 	"github.com/edganiukov/taugres/internal/lock"
 	"github.com/edganiukov/taugres/internal/model"
-	"github.com/edganiukov/taugres/internal/render"
+	shellreg "github.com/edganiukov/taugres/internal/shell"
 	"github.com/edganiukov/taugres/internal/shellhook"
 	"github.com/edganiukov/taugres/internal/state"
+	"github.com/edganiukov/taugres/internal/toolmgr"
 	"github.com/edganiukov/taugres/internal/tools/mise"
-	"github.com/edganiukov/taugres/internal/tools/npm"
-	"github.com/edganiukov/taugres/internal/tools/pip"
-	"github.com/edganiukov/taugres/internal/tools/uv"
 	"github.com/edganiukov/taugres/internal/trust"
-	"github.com/edganiukov/taugres/internal/ui"
 	"github.com/edganiukov/taugres/internal/validate"
 )
 
@@ -105,7 +98,7 @@ func runInit(e *Env, args []string) int {
 
 	name := filepath.Base(e.Wd)
 	content := fmt.Sprintf(tmpl, name)
-	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+	if err := atomicfile.Write(target, []byte(content), 0o644); err != nil {
 		return fail(e, "writing %s: %v", target, err)
 	}
 	fmt.Fprintf(e.Stdout, "tau: created %s\n", target)
@@ -167,775 +160,11 @@ func runCheck(e *Env, args []string) int {
 	return 0
 }
 
-// --- sync ---
-
-func runSync(e *Env, args []string) int {
-	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
-	fs.SetOutput(e.Stderr)
-	ifStale := fs.Bool("if-stale", false, "only sync if the config changed since the last sync (used by tau hook-env)")
-	verbose := fs.Bool("verbose", false, "print every sync step instead of a single updating line")
-	update := fs.Bool("update", false, "re-resolve unpinned tools/packages to their latest versions and update .taugres.lock")
-	force := fs.Bool("force", false, "reinstall tools/packages even if unchanged; limit to named managers, e.g. `tau sync --force mise`")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-
-	// --force reinstalls even when a manager looks fresh: with no names it forces
-	// all managers, otherwise just the named ones (mise|pip|npm|uv). Positional
-	// args are only meaningful with --force.
-	forced := map[string]bool{}
-	if *force {
-		names := fs.Args()
-		if len(names) == 0 {
-			names = updManagers
-		}
-		for _, n := range names {
-			if strings.HasPrefix(n, "-") {
-				return fail(e, "sync: put flags before manager names, e.g. `tau sync --verbose --force mise` (got %q)", n)
-			}
-			if !slices.Contains(updManagers, n) {
-				return fail(e, "sync --force: unknown manager %q (want one of %s)", n, strings.Join(updManagers, ", "))
-			}
-			forced[n] = true
-		}
-	} else if rest := fs.Args(); len(rest) > 0 {
-		return fail(e, "sync: unexpected argument %q (did you mean `tau sync --force %s`?)", rest[0], strings.Join(rest, " "))
-	}
-
-	ctx := e.ctx() // cancelled on Ctrl+C so tool installs stop promptly
-
-	// Discovery is cheap and needed before locking.
-	d, err := discover.Discover(e.Wd)
-	if err != nil {
-		return fail(e, "%v", err)
-	}
-	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
-
-	// Trust gate first: an untrusted project can never sync (activation would
-	// source shell.fn/shell.hook files and run installs), so bail before any
-	// lock, Starlark eval, or tool work. In hook mode (--if-stale) stay silent —
-	// `tau hook-env` is the single voice that tells the user to run `tau allow`
-	// (it also pre-checks trust, so it normally never gets here); only a manual
-	// `tau sync` says so itself.
-	allowed, err := trust.IsAllowed(d.ConfigPath)
-	if err != nil {
-		return fail(e, "checking trust: %v", err)
-	}
-	if !allowed {
-		if *ifStale {
-			return 0
-		}
-		return fail(e, "project is not trusted; review the config, then run `tau allow`")
-	}
-
-	// Serialize syncs for this project: only one runs at a time; others wait.
-	// Show the wait as a transient spinner line so it is cleared once we
-	// proceed (and thus overwritten by the activation/synced message).
-	var waitSpinner *ui.Spinner
-	unlock, err := state.Lock(stateDir, func() {
-		waitSpinner = ui.NewSpinner(e.Stderr)
-		waitSpinner.Start("tau: waiting for another sync to finish…")
-	})
-	if err != nil {
-		return fail(e, "acquiring sync lock: %v", err)
-	}
-	if waitSpinner != nil {
-		waitSpinner.Stop()
-	}
-	defer unlock()
-
-	// In hook mode, re-check under the lock so we don't redo work another
-	// process just finished while we waited. The cheap mtime check is only a
-	// trigger: timestamp granularity can miss a same-tick edit, and it does not
-	// verify generated scripts. Confirm freshness with hashes before skipping.
-	if *ifStale {
-		need, err := state.NeedsSync(stateDir, d.ConfigPath)
-		if err == nil {
-			// The cheap mtime trigger also fires on a no-op touch (an editor save that
-			// rewrites the file, `git checkout` bumping mtimes). If the thorough
-			// hash/script/tool check says nothing actually changed, skip the whole
-			// sync — no Starlark eval, no tool probing, no script regeneration. When
-			// the cheap check did fire, re-anchor the manifest mtime so the hook stops
-			// re-triggering on every prompt.
-			if !state.CheckStale(stateDir, render.SupportedShells).Stale {
-				if need {
-					_ = state.TouchManifest(stateDir)
-				}
-				return 0
-			}
-		}
-	}
-
-	res, err := config.Evaluate(d)
-	if err != nil {
-		return fail(e, "evaluating %s:\n%v", d.ConfigPath, err)
-	}
-	report := validate.Validate(res.Plan)
-	if report.HasErrors() {
-		for _, errMsg := range report.Errors {
-			fmt.Fprintf(e.Stderr, "tau: error: %s\n", errMsg)
-		}
-		return fail(e, "config has validation errors; run `tau check` for details")
-	}
-
-	plan := res.Plan
-	rep := ui.NewReporter(e.Stderr, *verbose)
-	defer rep.Done()
-
-	// syncFail clears the progress line before printing an error, so error text
-	// never gets appended to an active spinner line.
-	syncFail := func(format string, args ...any) int {
-		rep.Done()
-		return fail(e, format, args...)
-	}
-
-	// Load the committed lockfile. Versions are pinned by default (reproducible);
-	// --update re-resolves unpinned entries. GC prunes lock entries and
-	// uninstalls packages that were removed from the config.
-	lk, err := lock.Load(d.ProjectRoot)
-	if err != nil {
-		return syncFail("reading %s: %v", lock.FileName, err)
-	}
-
-	// Tool installs are best-effort: a failure is collected but does not abort
-	// the sync, so the shell environment (env vars, PATH, aliases, functions) is
-	// always generated even if a package fails to install.
-	var toolErrs []string
-	var toolErrsMu sync.Mutex
-	addErr := func(msg string) {
-		toolErrsMu.Lock()
-		toolErrs = append(toolErrs, msg)
-		toolErrsMu.Unlock()
-	}
-
-	// Split the sync into two concerns: installing tools (slow, may hit the
-	// network) and preparing the shell (fast, always regenerated below). A tool
-	// manager (mise/pip/npm/uv) is fresh when its signature — its declared
-	// tools/packages joined with their locked versions — is unchanged since the
-	// last sync and its bin dirs still exist; a fresh manager's install is
-	// skipped. When every manager is fresh, the whole install phase is skipped
-	// and the cached mise store bin dirs are reused for PATH without re-probing
-	// mise, so editing an env var / alias / hook never spawns a tool subprocess.
-	// --update forces a full install pass.
-	//
-	// Signatures are computed from the lock as loaded from disk, which in steady
-	// state already carries the resolved versions from the last sync.
-	sig := toolSigs(plan, lk)
-	prior, _ := state.Load(plan.StateDir)
-	fresh := freshness(prior, sig, plan, *update, forced)
-
-	var miseBinDirs, toolDirs []string
-	if prior != nil && fresh.allFresh() {
-		// Recover the mise store bin dirs (needed for PATH) from the recorded tool
-		// dirs by dropping the package bin dirs, which are deterministic from the
-		// plan — so no dir is cached twice.
-		toolDirs = prior.ToolDirs
-		miseBinDirs = miseBinDirsFrom(toolDirs, plan)
-	} else {
-		miseBinDirs, toolDirs = installTools(ctx, plan, lk, rep, *update, forced, addErr, fresh)
-		// Persist the lockfile (best effort; it is committed with the project).
-		if err := lk.Save(d.ProjectRoot); err != nil {
-			addErr("writing " + lock.FileName + ": " + err.Error())
-		}
-		// Recompute from the post-install lock so the stored signatures reflect the
-		// now-resolved versions; the next sync's signatures (read from the same lock
-		// on disk) then match and each manager takes the fast path.
-		sig = toolSigs(plan, lk)
-	}
-
-	// If the user interrupted (Ctrl+C) during installs, stop here without writing
-	// scripts or the manifest, so the environment is not marked fresh and the next
-	// sync retries.
-	interrupted := func() bool {
-		if ctx.Err() == nil {
-			return false
-		}
-		rep.Done()
-		fmt.Fprintln(e.Stderr, "tau: sync interrupted")
-		return true
-	}
-	if interrupted() {
-		return 130
-	}
-
-	// Prepend mise tool bin dirs to the activation PATH (in front of the
-	// project-local pip/npm dirs already in plan.PathPrepend).
-	plan.PathPrepend = dedupStrings(append(append([]string{}, miseBinDirs...), plan.PathPrepend...))
-
-	// Resolve deferred env vars (shell.exec / mise.where). Sync is trust-gated and
-	// tools are on PATH, so fully-static values are run/looked-up now and baked
-	// into EnvSet; values with a dynamic exec have their static segments baked in
-	// place and are rendered as command substitutions at activation. Best-effort:
-	// a failure is reported but never aborts the sync.
-	resolveDeferredEnvForSync(ctx, plan, lk, addErr)
-	if interrupted() {
-		return 130
-	}
-
-	rep.Step("tau: generating shell scripts")
-	genDir := state.GenDir(plan.StateDir)
-	if err := os.MkdirAll(genDir, 0o755); err != nil {
-		return syncFail("creating %s: %v", genDir, err)
-	}
-
-	for _, sh := range render.SupportedShells {
-		act, err := render.Activate(plan, sh)
-		if err != nil {
-			return syncFail("rendering activate.%s: %v", sh, err)
-		}
-		deact, err := render.Deactivate(plan, sh)
-		if err != nil {
-			return syncFail("rendering deactivate.%s: %v", sh, err)
-		}
-		if err := os.WriteFile(filepath.Join(genDir, "activate."+sh), []byte(act), 0o644); err != nil {
-			return syncFail("writing activate.%s: %v", sh, err)
-		}
-		if err := os.WriteFile(filepath.Join(genDir, "deactivate."+sh), []byte(deact), 0o644); err != nil {
-			return syncFail("writing deactivate.%s: %v", sh, err)
-		}
-	}
-
-	// Write the manifest last so it is the newest file: the staleness checks
-	// treat any recorded input newer than the manifest as "changed". It records
-	// config inputs (config file, loaded modules, fn/hook source files), the tool
-	// bin dirs that must exist, and the exists()/which() probe results — so a
-	// changed input, a removed tool dir, or a flipped probe all trigger a resync.
-	m, err := buildManifest(res, toolDirs, sig)
-	if err != nil {
-		return syncFail("building manifest: %v", err)
-	}
-	if err := m.Write(plan.StateDir); err != nil {
-		return syncFail("writing manifest: %v", err)
-	}
-
-	ensureGitignore(plan.ProjectRoot)
-
-	rep.Done()
-	for _, warn := range report.Warnings {
-		fmt.Fprintf(e.Stderr, "tau: warning: %s\n", warn)
-	}
-	// Surface any tool-install failures. The env is generated regardless, so the
-	// shell still works; re-run `tau sync` to retry the failed installs.
-	for _, te := range toolErrs {
-		fmt.Fprintf(e.Stderr, "tau: %s\n", te)
-	}
-
-	// Confirm completion for a manual `tau sync`. On the hook's auto-sync
-	// (--if-stale) the activation banner is the finale instead, so stay quiet.
-	if !*ifStale {
-		if len(toolErrs) > 0 {
-			fmt.Fprintf(e.Stdout, "=^..^= tau synced %s (env only; some tools failed)\n", displayName(plan))
-		} else {
-			fmt.Fprintf(e.Stdout, "=^..^= tau synced %s\n", displayName(plan))
-		}
-	}
-	if len(toolErrs) > 0 {
-		return 1
-	}
-	return 0
-}
-
-// displayName returns the project's name, falling back to its directory name.
-func displayName(plan *model.Plan) string {
-	if plan.ProjectName != "" {
-		return plan.ProjectName
-	}
-	return filepath.Base(plan.ProjectRoot)
-}
-
-// buildManifest hashes every config input (config file, loaded modules, fn/hook
-// source files) and pairs them with the tool dirs, probe results, and the
-// per-manager tool signatures into the single manifest.
-func buildManifest(res *config.Result, toolDirs []string, toolSig map[string]string) (*state.Manifest, error) {
-	plan := res.Plan
-	inputs := map[string]string{}
-	add := func(path string) error {
-		h, err := state.HashFile(path)
-		if err != nil {
-			return err
-		}
-		inputs[path] = h
-		return nil
-	}
-	if err := add(plan.ConfigPath); err != nil {
-		return nil, err
-	}
-	for _, m := range res.LoadedModules {
-		if err := add(m); err != nil {
-			return nil, err
-		}
-	}
-	for _, f := range sourceFiles(plan) {
-		if err := add(f); err != nil {
-			return nil, err
-		}
-	}
-	// shell.dotenv(...) and read(...) files are config inputs too: editing one
-	// changes the resulting env.
-	for _, f := range res.DotenvFiles {
-		if err := add(f); err != nil {
-			return nil, err
-		}
-	}
-	for _, f := range res.ReadFiles {
-		if err := add(f); err != nil {
-			return nil, err
-		}
-	}
-	return &state.Manifest{
-		Inputs:   inputs,
-		ToolDirs: toolDirs,
-		Probes:   res.Probes,
-		ToolSig:  toolSig,
-	}, nil
-}
-
-// packageBinDirs returns the pip/npm/uv bin dirs recorded in the tool-dir list —
-// one per manager that has packages. Unlike the mise store dirs (resolved via
-// `mise where`), these are deterministic from the plan, so they are not cached
-// separately: the fast path recovers the mise dirs by removing these from the
-// recorded tool dirs.
-func packageBinDirs(plan *model.Plan) []string {
-	var dirs []string
-	if len(plan.PipPackages) > 0 {
-		dirs = append(dirs, filepath.Join(plan.PipDir, "bin"))
-	}
-	if len(plan.NpmPackages) > 0 {
-		dirs = append(dirs, filepath.Join(plan.NpmDir, "bin"))
-	}
-	if len(plan.UvPackages) > 0 {
-		dirs = append(dirs, filepath.Join(plan.UvDir, "bin"))
-	}
-	return dirs
-}
-
-// miseBinDirsFrom recovers the mise store bin dirs from a recorded tool-dir list
-// by removing the deterministic package bin dirs.
-func miseBinDirsFrom(toolDirs []string, plan *model.Plan) []string {
-	pkg := map[string]bool{}
-	for _, d := range packageBinDirs(plan) {
-		pkg[d] = true
-	}
-	var out []string
-	for _, d := range toolDirs {
-		if !pkg[d] {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// allExist reports whether every path is an existing directory. It gates the
-// install-skipping fast path: a wiped .taugres/tools forces a full reinstall.
-func allExist(dirs []string) bool {
-	for _, d := range dirs {
-		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
-			return false
-		}
-	}
-	return true
-}
-
-// toolSigs fingerprints each tool manager's install-relevant state: its declared
-// tools/packages paired with their locked spec (requested + resolved). A manager
-// with nothing declared is omitted. Comparing these per-manager lets a sync
-// reinstall only the manager whose inputs changed: a changed declaration, a
-// re-pin, or a dropped lock entry (e.g. from `tau update`) flips just that
-// manager's signature. Entries are sorted so declaration order does not affect
-// the hash.
-func toolSigs(plan *model.Plan, lk *lock.File) map[string]string {
-	sigs := map[string]string{}
-	hash := func(mgr string, lines []string) {
-		if len(lines) == 0 {
-			return
-		}
-		sort.Strings(lines)
-		sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
-		sigs[mgr] = hex.EncodeToString(sum[:])
-	}
-	line := func(name, ver string, sec map[string]lock.Entry) string {
-		e := sec[name]
-		return strings.Join([]string{name, ver, e.Requested, e.Resolved}, "\x1f")
-	}
-	var mise, pip, npm, uv []string
-	for _, t := range plan.MiseTools {
-		mise = append(mise, line(t.Name, t.Version, lk.Mise))
-	}
-	for _, p := range plan.PipPackages {
-		pip = append(pip, line(p.Name, p.Version, lk.Pip))
-	}
-	for _, p := range plan.NpmPackages {
-		npm = append(npm, line(p.Name, p.Version, lk.Npm))
-	}
-	for _, p := range plan.UvPackages {
-		uv = append(uv, line(p.Name, p.Version, lk.Uv))
-	}
-	hash("mise", mise)
-	hash("pip", pip)
-	hash("npm", npm)
-	hash("uv", uv)
-	return sigs
-}
-
-// toolFreshness records, for one sync, which managers are already up to date (so
-// their install is skipped) plus the mise store bin dirs cached from the last
-// sync — reused for PATH when mise is fresh, so no `mise where` probe is needed.
-type toolFreshness struct {
-	miseStale, pipStale, npmStale, uvStale bool
-	miseDirs                               []string // cached mise bin dirs, valid when !miseStale
-}
-
-// allFresh reports whether no manager needs installing, so the whole install
-// phase can be skipped and only the shell scripts regenerated.
-func (f toolFreshness) allFresh() bool {
-	return !f.miseStale && !f.pipStale && !f.npmStale && !f.uvStale
-}
-
-// freshness compares the current per-manager signatures against the last sync's
-// to decide which managers must reinstall. A manager is stale when --update is
-// set, it was added or dropped since the last sync, its signature changed, or
-// its recorded bin dirs are missing. The mise store dirs are recovered from the
-// prior manifest (so freshness needs no `mise where`).
-func freshness(prior *state.Manifest, cur map[string]string, plan *model.Plan, update bool, forced map[string]bool) toolFreshness {
-	var priorSig map[string]string
-	var miseDirs []string
-	if prior != nil {
-		priorSig = prior.ToolSig
-		miseDirs = miseBinDirsFrom(prior.ToolDirs, plan)
-	}
-	// A manager is stale when it was declared before XOR now (added/dropped), or —
-	// when declared both times — --update or --force targets it, its signature
-	// changed, or its dirs vanished. A manager declared in neither sync is fresh.
-	stale := func(mgr string, declared bool, dirs []string) bool {
-		_, was := priorSig[mgr]
-		if declared != was {
-			return true
-		}
-		if !declared {
-			return false
-		}
-		return update || forced[mgr] || cur[mgr] != priorSig[mgr] || !allExist(dirs)
-	}
-	return toolFreshness{
-		miseStale: stale("mise", len(plan.MiseTools) > 0, miseDirs),
-		pipStale:  stale("pip", len(plan.PipPackages) > 0, []string{filepath.Join(plan.PipDir, "bin")}),
-		npmStale:  stale("npm", len(plan.NpmPackages) > 0, []string{filepath.Join(plan.NpmDir, "bin")}),
-		uvStale:   stale("uv", len(plan.UvPackages) > 0, []string{filepath.Join(plan.UvDir, "bin")}),
-		miseDirs:  miseDirs,
-	}
-}
-
-// installTools runs the per-tool staleness + install pipeline: it installs only
-// the managers whose declared set changed (or all, when force), GCs tools
-// dropped from the config, and returns the mise store bin dirs (prepended to
-// PATH) plus the full set of tool bin dirs (recorded for staleness). Install
-// failures are reported via addErr rather than aborting, so the shell env is
-// always built. It may hit the network and belongs to sync, never activation.
-func installTools(ctx context.Context, plan *model.Plan, lk *lock.File, rep *ui.Reporter, update bool, forced map[string]bool, addErr func(string), fresh toolFreshness) (miseBinDirs, toolDirs []string) {
-	// Tool output is streamed through the reporter prefixed with the tool name.
-	installReport := func(name string) func(bool) {
-		rep.Step("tau: installing " + name)
-		return func(ok bool) {
-			if ok {
-				rep.Step("tau: installed " + name)
-			}
-		}
-	}
-
-	var toolchainBinDirs, restBinDirs []string
-	miseReinstalled := false
-	var wg sync.WaitGroup
-
-	switch {
-	case len(plan.MiseTools) == 0:
-		// Nothing declared: no store dirs on PATH (and any previously-installed
-		// tools were dropped, so gcTools prunes their lock entries below).
-	case !mise.Available():
-		addErr("mise is required to install tools but is not installed — install it with `curl https://mise.run | sh` (see https://mise.jdx.dev; the mise binary on PATH is all tau needs)")
-	case !fresh.miseStale:
-		// Unchanged: reuse the store bin dirs cached from the last sync (no
-		// `mise where`) for PATH and as the toolchain for pip/uv/npm.
-		miseBinDirs = fresh.miseDirs
-		toolchainBinDirs = fresh.miseDirs
-	default:
-		miseReinstalled = true
-		// Effective versions (locked unless --update / spec changed).
-		effMise := make([]model.MiseTool, len(plan.MiseTools))
-		reqByName := map[string]string{}
-		for i, t := range plan.MiseTools {
-			e, ok := lk.Mise[t.Name]
-			effMise[i] = model.MiseTool{Name: t.Name, Version: lock.InstallVersion(t.Version, e, ok, update)}
-			reqByName[t.Name] = t.Version
-		}
-		// recordMise writes lock entries and returns the tools' bin dirs. Each
-		// caller touches only its own tools' entries, so concurrent calls are safe.
-		recordMise := func(installed []mise.Installed) []string {
-			var dirs []string
-			for _, ins := range installed {
-				lk.Mise[ins.Name] = lock.Entry{Requested: reqByName[ins.Name], Resolved: ins.Resolved}
-				dirs = append(dirs, ins.BinDir)
-			}
-			return dirs
-		}
-
-		// The package toolchain (node for npm; python for pip/uv; uv for uv) is
-		// installed first and in isolation, so a failure of any *other* mise tool
-		// can never stop pip/uv/npm from getting their runtime. finalize
-		// guarantees these implicit tools whenever the packages are declared.
-		needNode := len(plan.NpmPackages) > 0
-		needPython := len(plan.PipPackages) > 0 || len(plan.UvPackages) > 0
-		needUv := len(plan.UvPackages) > 0
-		var toolchain, rest []model.MiseTool
-		for _, t := range effMise {
-			if (needNode && t.Name == "node") || (needPython && t.Name == "python") || (needUv && t.Name == "uv") {
-				toolchain = append(toolchain, t)
-			} else {
-				rest = append(rest, t)
-			}
-		}
-
-		// --force mise reinstalls even already-present store versions.
-		miseForce := forced["mise"]
-		if len(toolchain) > 0 {
-			installed, err := mise.Install(ctx, toolchain, plan.MiseJobs, miseForce, rep.Stream("mise: "), installReport)
-			if err != nil {
-				addErr(err.Error())
-			}
-			toolchainBinDirs = recordMise(installed)
-		}
-		// The rest of the mise tools install concurrently with pip/npm/uv below.
-		if len(rest) > 0 {
-			wg.Go(func() {
-				installed, err := mise.Install(ctx, rest, plan.MiseJobs, miseForce, rep.Stream("mise: "), installReport)
-				if err != nil {
-					addErr(err.Error())
-				}
-				restBinDirs = recordMise(installed)
-			})
-		}
-	}
-
-	// The pip/uv/npm integrations are uniform, so describe them once and let
-	// install and GC iterate instead of repeating near-identical blocks. Each
-	// closure captures its manager's prefix dir, the toolchain bin dirs, and its
-	// output stream. dir is the canonical prefix (known even with no packages, so
-	// GC can remove a fully-dropped manager); its bin/ is auto-prepended to PATH.
-	pkgDir := func(name string) string { return filepath.Join(plan.StateDir, "tools", name) }
-	managers := []packageManager{
-		{
-			label: "pip", stale: fresh.pipStale, pkgs: plan.PipPackages, dir: pkgDir("pip"), section: lk.Pip,
-			install: func(p []model.Package) (map[string]string, error) {
-				return pip.Install(ctx, p, pkgDir("pip"), toolchainBinDirs, rep.Stream("pip: "), installReport)
-			},
-			uninstall: func(n []string) error { return pip.Uninstall(ctx, pkgDir("pip"), n, rep.Stream("pip: ")) },
-		},
-		{
-			label: "npm", stale: fresh.npmStale, pkgs: plan.NpmPackages, dir: pkgDir("npm"), section: lk.Npm,
-			install: func(p []model.Package) (map[string]string, error) {
-				return npm.Install(ctx, p, pkgDir("npm"), toolchainBinDirs, rep.Stream("npm: "), installReport)
-			},
-			uninstall: func(n []string) error {
-				return npm.Uninstall(ctx, pkgDir("npm"), n, toolchainBinDirs, rep.Stream("npm: "))
-			},
-		},
-		{
-			label: "uv", stale: fresh.uvStale, pkgs: plan.UvPackages, dir: pkgDir("uv"), section: lk.Uv,
-			install: func(p []model.Package) (map[string]string, error) {
-				return uv.Install(ctx, p, pkgDir("uv"), toolchainBinDirs, rep.Stream("uv: "), installReport)
-			},
-			uninstall: func(n []string) error {
-				return uv.Uninstall(ctx, pkgDir("uv"), n, toolchainBinDirs, rep.Stream("uv: "))
-			},
-		},
-	}
-	// Install stale managers concurrently (with the rest of mise, above). They use
-	// the toolchain bin dirs to find python/node/uv, so never wait on other tools.
-	for i := range managers {
-		m := managers[i]
-		if !m.stale {
-			continue
-		}
-		wg.Go(func() {
-			// --force <mgr> does a clean reinstall: tau owns these prefixes, so wipe
-			// and rebuild from the (locked) versions.
-			if forced[m.label] {
-				_ = os.RemoveAll(m.dir)
-			}
-			resolved, err := m.install(effectiveVersions(m.pkgs, m.section, update))
-			if err != nil {
-				addErr(err.Error())
-			}
-			recordResolved(m.section, m.pkgs, resolved)
-		})
-	}
-	wg.Wait()
-	if miseReinstalled {
-		miseBinDirs = append(toolchainBinDirs, restBinDirs...)
-	}
-
-	// GC: uninstall packages and prune lock entries that were removed from the
-	// config.
-	gcTools(plan, lk, managers, rep)
-
-	// Tool bin dirs recorded for staleness: mise store bins followed by each
-	// package manager's prefix bin (present only when it has packages). The order
-	// and derivation must match miseBinDirsFrom, which recovers the mise subset by
-	// removing the package bin dirs.
-	toolDirs = append(append([]string{}, miseBinDirs...), packageBinDirs(plan)...)
-	return miseBinDirs, toolDirs
-}
-
-// gcTools removes packages and lock entries that were dropped from the config.
-// PATH entries need no cleanup — they are regenerated from the current config.
-// mise installs live in mise's shared store, so only their lock entries are
-// pruned; pip/npm packages are uninstalled from their project-local prefixes.
-func gcTools(plan *model.Plan, lk *lock.File, managers []packageManager, rep *ui.Reporter) {
-	// mise: prune lock entries for tools no longer declared (installs live in
-	// mise's shared store, so only the lock entry is dropped).
-	keep := nameSet(plan.MiseTools, func(t model.MiseTool) string { return t.Name })
-	for name := range lk.Mise {
-		if !keep[name] {
-			delete(lk.Mise, name)
-		}
-	}
-
-	// pip/uv/npm: drop the whole prefix if the manager has no packages left;
-	// otherwise uninstall just the ones removed from the config.
-	for _, m := range managers {
-		if len(m.pkgs) == 0 {
-			_ = os.RemoveAll(m.dir)
-			clear(m.section)
-			continue
-		}
-		removed := removedKeys(m.section, nameSet(m.pkgs, func(p model.Package) string { return p.Name }))
-		if len(removed) > 0 {
-			rep.Step("tau: removing " + strings.Join(removed, ", "))
-			_ = m.uninstall(removed)
-			for _, n := range removed {
-				delete(m.section, n)
-			}
-		}
-	}
-}
-
-// packageManager describes one of the uniform pip/uv/npm integrations so a sync
-// can drive install and GC from a table instead of near-identical blocks. The
-// install/uninstall closures capture the manager's prefix dir, toolchain bin
-// dirs, and output stream.
-type packageManager struct {
-	label     string
-	stale     bool
-	pkgs      []model.Package
-	dir       string // canonical prefix (<stateDir>/tools/<label>); its bin/ is on PATH
-	section   map[string]lock.Entry
-	install   func(pkgs []model.Package) (map[string]string, error)
-	uninstall func(names []string) error
-}
-
-// effectiveVersions maps declared packages to the versions to install: the
-// locked version unless --update or the spec changed re-resolves them.
-func effectiveVersions(pkgs []model.Package, locked map[string]lock.Entry, update bool) []model.Package {
-	eff := make([]model.Package, len(pkgs))
-	for i, p := range pkgs {
-		e, ok := locked[p.Name]
-		eff[i] = model.Package{Name: p.Name, Version: lock.InstallVersion(p.Version, e, ok, update)}
-	}
-	return eff
-}
-
-// recordResolved writes each package's resolved concrete version back to the
-// lock section.
-func recordResolved(locked map[string]lock.Entry, pkgs []model.Package, resolved map[string]string) {
-	for _, p := range pkgs {
-		if v, ok := resolved[p.Name]; ok {
-			locked[p.Name] = lock.Entry{Requested: p.Version, Resolved: v}
-		}
-	}
-}
-
-// removedKeys returns the sorted lock keys that are absent from keep.
-func removedKeys(entries map[string]lock.Entry, keep map[string]bool) []string {
-	var out []string
-	for name := range entries {
-		if !keep[name] {
-			out = append(out, name)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// nameSet builds a set of names from a package/tool slice.
-func nameSet[T any](items []T, name func(T) string) map[string]bool {
-	m := make(map[string]bool, len(items))
-	for _, it := range items {
-		m[name(it)] = true
-	}
-	return m
-}
-
-// dedupStrings returns in with duplicate entries removed, preserving order.
-func dedupStrings(in []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, s := range in {
-		if seen[s] {
-			continue
-		}
-		seen[s] = true
-		out = append(out, s)
-	}
-	return out
-}
-
-// sourceFiles returns the sorted, de-duplicated set of external files
-// referenced by shell.fn and shell.hook (file=). Inline content is skipped.
-func sourceFiles(p *model.Plan) []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(f string) {
-		if f != "" && !seen[f] {
-			seen[f] = true
-			out = append(out, f)
-		}
-	}
-	for _, entries := range p.SourceFuncs {
-		for _, sf := range entries {
-			add(sf.File)
-		}
-	}
-	for _, h := range p.Hooks {
-		add(h.File)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func ensureGitignore(projectRoot string) {
-	gi := filepath.Join(projectRoot, ".gitignore")
-	data, err := os.ReadFile(gi)
-	if err == nil {
-		if slices.Contains(strings.Split(string(data), "\n"), ".taugres/") {
-			return
-		}
-		f, err := os.OpenFile(gi, os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-		_, _ = f.WriteString(".taugres/\n")
-		return
-	}
-	if os.IsNotExist(err) {
-		_ = os.WriteFile(gi, []byte(".taugres/\n"), 0o644)
-	}
-}
-
 // --- update ---
 
 // updManagers are the tool-manager qualifiers accepted as a "<manager>:name"
 // prefix by `tau update`, in lock-section order.
-var updManagers = []string{"mise", "pip", "npm", "uv"}
+var updManagers = slices.Clone(toolmgr.All)
 
 // splitManager splits an optional "<manager>:" qualifier off an update
 // argument. Only mise/pip/npm/uv count as qualifiers; any other leading segment
@@ -951,17 +180,7 @@ func splitManager(arg string) (manager, name string) {
 
 // sectionOf returns the lock section for a manager qualifier.
 func sectionOf(lk *lock.File, manager string) map[string]lock.Entry {
-	switch manager {
-	case "mise":
-		return lk.Mise
-	case "pip":
-		return lk.Pip
-	case "npm":
-		return lk.Npm
-	case "uv":
-		return lk.Uv
-	}
-	return nil
+	return toolmgr.Section(lk, manager)
 }
 
 // updTarget locates a named tool/package: the manager it belongs to and whether
@@ -986,26 +205,13 @@ func targets(p *model.Plan, manager, name string) []updTarget {
 			}
 		}
 	}
-	if want("pip") {
-		for _, x := range p.PipPackages {
-			if x.Name == name {
-				out = append(out, updTarget{"pip", x.Version != ""})
-				break
-			}
+	for _, descriptor := range toolmgr.PackageManagers {
+		if !want(descriptor.ID) {
+			continue
 		}
-	}
-	if want("npm") {
-		for _, x := range p.NpmPackages {
-			if x.Name == name {
-				out = append(out, updTarget{"npm", x.Version != ""})
-				break
-			}
-		}
-	}
-	if want("uv") {
-		for _, x := range p.UvPackages {
-			if x.Name == name {
-				out = append(out, updTarget{"uv", x.Version != ""})
+		for _, pkg := range descriptor.Packages(p) {
+			if pkg.Name == name {
+				out = append(out, updTarget{descriptor.ID, pkg.Version != ""})
 				break
 			}
 		}
@@ -1028,13 +234,9 @@ func runUpdate(e *Env, args []string) int {
 	}
 	names := fs.Args()
 
-	syncArgs := []string{}
-	if *verbose {
-		syncArgs = append(syncArgs, "--verbose")
-	}
 	// No names: update everything unpinned.
 	if len(names) == 0 {
-		return runSync(e, append(syncArgs, "--update"))
+		return syncProject(e, syncOptions{verbose: *verbose, update: true})
 	}
 
 	er, code := discoverAndEval(e)
@@ -1066,7 +268,6 @@ func runUpdate(e *Env, args []string) int {
 			old := ""
 			if entry, ok := sec[name]; ok {
 				old = entry.Resolved
-				delete(sec, name)
 			}
 			updated = append(updated, cleared{t.manager, name, old})
 		}
@@ -1075,16 +276,16 @@ func runUpdate(e *Env, args []string) int {
 		fmt.Fprintln(e.Stdout, "tau: nothing to update")
 		return 0
 	}
-	if err := lk.Save(er.disc.ProjectRoot); err != nil {
-		return fail(e, "writing %s: %v", lock.FileName, err)
-	}
-
 	labels := make([]string, len(updated))
 	for i, u := range updated {
 		labels[i] = u.name
 	}
 	fmt.Fprintf(e.Stdout, "tau: updating %s\n", strings.Join(labels, ", "))
-	if code := runSync(e, syncArgs); code != 0 {
+	updateTargets := make([]string, 0, len(updated))
+	for _, u := range updated {
+		updateTargets = append(updateTargets, u.manager+":"+u.name)
+	}
+	if code := syncProject(e, syncOptions{verbose: *verbose, updateTarget: updateTargets}); code != 0 {
 		return code
 	}
 
@@ -1152,7 +353,10 @@ func runExec(e *Env, args []string) int {
 	// goes to stderr to keep our stdout for the command.
 	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
 	if need, nerr := state.NeedsSync(stateDir, d.ConfigPath); nerr == nil && need {
-		runSync(&Env{Stdout: e.Stderr, Stderr: e.Stderr, Wd: e.Wd}, []string{"--if-stale"})
+		code := syncProject(&Env{Stdout: e.Stderr, Stderr: e.Stderr, Wd: e.Wd, Ctx: e.ctx()}, syncOptions{ifStale: true})
+		if code == 130 {
+			return code
+		}
 	}
 
 	res, err := config.Evaluate(d)
@@ -1165,10 +369,10 @@ func runExec(e *Env, args []string) int {
 	// pip/uv/npm bin dirs are already deterministic in plan.PathPrepend.
 	var miseBinDirs []string
 	if m, lerr := state.Load(stateDir); lerr == nil {
-		miseBinDirs = miseBinDirsFrom(m.ToolDirs, plan)
+		miseBinDirs = miseBinDirsFrom(m, plan)
 	}
 
-	envMap := projectEnvMap(plan, miseBinDirs)
+	envMap := environment.Build(plan, miseBinDirs)
 
 	// Resolve every deferred env var (shell.exec / mise.where) into the child env.
 	// exec has no shell, so both static and dynamic segments run now, against the
@@ -1177,7 +381,7 @@ func runExec(e *Env, args []string) int {
 	if len(plan.DeferredEnv) > 0 {
 		lk, _ := lock.Load(d.ProjectRoot)
 		for _, de := range plan.DeferredEnv {
-			val, derr := resolveDeferred(e.ctx(), de.Segments, lk, plan, flattenEnv(envMap))
+			val, derr := resolveDeferred(e.ctx(), de.Segments, lk, plan, environment.Flatten(envMap))
 			if derr != nil {
 				fmt.Fprintf(e.Stderr, "tau: shell.env %s: %v\n", de.Name, derr)
 				continue
@@ -1185,7 +389,7 @@ func runExec(e *Env, args []string) int {
 			envMap[de.Name] = val
 		}
 	}
-	env := flattenEnv(envMap)
+	env := environment.Flatten(envMap)
 
 	bin, err := lookPathIn(rest[0], env)
 	if err != nil {
@@ -1208,63 +412,6 @@ func runExec(e *Env, args []string) int {
 	return 0
 }
 
-// projectEnvMap builds the resolved environment for `tau exec` as a map: the
-// ambient environment with the plan's env set/unset applied, the Taugres
-// built-in variables, and PATH prefixed by the tool bin dirs plus
-// shell.path.prepend entries (appends going after). It mirrors what an
-// activation exports, minus shell-only features and shell.exec vars (resolved by
-// the caller). mise store bin dirs (known only after sync) are prepended ahead of
-// plan.PathPrepend; pass nil when they are already merged into it.
-func projectEnvMap(plan *model.Plan, miseBinDirs []string) map[string]string {
-	env := map[string]string{}
-	for _, kv := range os.Environ() {
-		if k, v, ok := strings.Cut(kv, "="); ok {
-			env[k] = v
-		}
-	}
-	maps.Copy(env, plan.EnvSet)
-	for _, k := range plan.EnvUnset {
-		delete(env, k)
-	}
-	env["TAUGRES_ACTIVE"] = "1"
-	env["TAUGRES_ROOT"] = plan.RepoRoot
-	env["TAUGRES_REPO_ROOT"] = plan.RepoRoot
-	env["TAUGRES_PROJECT_ROOT"] = plan.ProjectRoot
-	env["TAUGRES_CONFIG"] = plan.ConfigPath
-	env["TAUGRES_LOCK"] = filepath.Join(plan.ProjectRoot, ".taugres.lock")
-	env["TAUGRES_STATE"] = plan.StateDir
-
-	sep := string(os.PathListSeparator)
-	path := env["PATH"]
-	for _, dir := range plan.PathAppend {
-		if path == "" {
-			path = dir
-		} else {
-			path = path + sep + dir
-		}
-	}
-	prepend := dedupStrings(append(append([]string{}, miseBinDirs...), plan.PathPrepend...))
-	for i := len(prepend) - 1; i >= 0; i-- {
-		if path == "" {
-			path = prepend[i]
-		} else {
-			path = prepend[i] + sep + path
-		}
-	}
-	env["PATH"] = path
-	return env
-}
-
-// flattenEnv renders an env map as a sorted "KEY=VALUE" slice for exec.Cmd.
-func flattenEnv(env map[string]string) []string {
-	out := make([]string, 0, len(env))
-	for k, v := range env {
-		out = append(out, k+"="+v)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // resolveDeferredEnvForSync resolves each plan.DeferredEnv at sync time. A
 // fully-static value (no dynamic exec) is joined and written to EnvSet, so it
 // activates instantly; a value with a dynamic exec has its static segments baked
@@ -1277,21 +424,27 @@ func resolveDeferredEnvForSync(ctx context.Context, plan *model.Plan, lk *lock.F
 		if de.IsDynamic() {
 			// Bake the static segments (mise.where, static exec) to literals; leave
 			// dynamic exec segments for the renderer.
+			env := environment.Flatten(environment.Build(plan, nil))
 			for j := range de.Segments {
 				s := &de.Segments[j]
 				if s.Kind == model.SegExec && s.Dynamic {
 					continue
 				}
-				val, err := resolveSegment(ctx, *s, lk, plan, flattenEnv(projectEnvMap(plan, nil)))
+				val, err := resolveSegment(ctx, *s, lk, plan, env)
 				if err != nil {
 					onErr("shell.env " + de.Name + ": " + err.Error())
+					// Never pass an unresolved static exec/where segment to the
+					// renderer: it would otherwise be mistaken for activation-time
+					// code or literal tool text.
+					*s = model.Segment{Kind: model.SegLiteral}
 					continue
 				}
 				*s = model.Segment{Kind: model.SegLiteral, Value: val}
 			}
 			continue
 		}
-		val, err := resolveDeferred(ctx, de.Segments, lk, plan, flattenEnv(projectEnvMap(plan, nil)))
+		env := environment.Flatten(environment.Build(plan, nil))
+		val, err := resolveDeferred(ctx, de.Segments, lk, plan, env)
 		if err != nil {
 			onErr("shell.env " + de.Name + ": " + err.Error())
 			continue
@@ -1322,7 +475,7 @@ func resolveSegment(ctx context.Context, s model.Segment, lk *lock.File, plan *m
 	case model.SegLiteral:
 		return s.Value, nil
 	case model.SegWhere:
-		return mise.ToolBinDir(s.Value, miseVersion(s.Value, lk, plan))
+		return mise.ToolBinDirContext(ctx, s.Value, miseVersion(s.Value, lk, plan))
 	case model.SegExec:
 		return captureCommand(ctx, s.Shell, s.Value, plan.ProjectRoot, env)
 	default:
@@ -1421,7 +574,7 @@ func runStatus(e *Env, args []string) int {
 	fmt.Fprintf(e.Stdout, "repo:    %s\n", plan.RepoRoot)
 	fmt.Fprintf(e.Stdout, "project: %s\n", plan.ProjectRoot)
 
-	stale := state.CheckStale(plan.StateDir, render.SupportedShells)
+	stale := state.CheckStale(plan.StateDir, shellreg.Supported)
 	if _, err := state.Load(plan.StateDir); err != nil {
 		fmt.Fprintf(e.Stdout, "synced:  no (run `tau sync`)\n")
 	} else if stale.Stale {
@@ -1450,36 +603,14 @@ func runStatus(e *Env, args []string) int {
 		}
 	}
 
-	if len(plan.PipPackages) > 0 {
-		fmt.Fprintf(e.Stdout, "\npip packages:\n")
-		for _, p := range plan.PipPackages {
-			ver := p.Version
-			if ver == "" {
-				ver = "latest"
-			}
-			fmt.Fprintf(e.Stdout, "  %s==%s\n", p.Name, ver)
+	for _, manager := range toolmgr.PackageManagers {
+		packages := manager.Packages(plan)
+		if len(packages) == 0 {
+			continue
 		}
-	}
-
-	if len(plan.NpmPackages) > 0 {
-		fmt.Fprintf(e.Stdout, "\nnpm packages:\n")
-		for _, p := range plan.NpmPackages {
-			ver := p.Version
-			if ver == "" {
-				ver = "latest"
-			}
-			fmt.Fprintf(e.Stdout, "  %s@%s\n", p.Name, ver)
-		}
-	}
-
-	if len(plan.UvPackages) > 0 {
-		fmt.Fprintf(e.Stdout, "\nuv packages:\n")
-		for _, p := range plan.UvPackages {
-			ver := p.Version
-			if ver == "" {
-				ver = "latest"
-			}
-			fmt.Fprintf(e.Stdout, "  %s==%s\n", p.Name, ver)
+		fmt.Fprintf(e.Stdout, "\n%s packages:\n", manager.ID)
+		for _, pkg := range packages {
+			fmt.Fprintf(e.Stdout, "  %s\n", manager.Display(pkg))
 		}
 	}
 
@@ -1541,8 +672,8 @@ func emitGenScript(e *Env, args []string, kind string) int {
 	default:
 		return fail(e, "usage: tau %s [shell] (bash|zsh|fish)", kind)
 	}
-	if !slices.Contains(render.SupportedShells, shell) {
-		return fail(e, "unsupported shell %q (supported: %s)", shell, strings.Join(render.SupportedShells, ", "))
+	if !shellreg.IsSupported(shell) {
+		return fail(e, "unsupported shell %q (supported: %s)", shell, strings.Join(shellreg.Supported, ", "))
 	}
 	d, err := discover.Discover(e.Wd)
 	if err != nil {
@@ -1626,12 +757,12 @@ func (t hookToken) String() string {
 // project, then activate the target), so the sourced env can never be left torn
 // down or doubly applied.
 func runHookEnv(e *Env, args []string) int {
-	if len(args) < 1 || len(args) > 2 {
-		return fail(e, "usage: tau hook-env <shell> [applied]")
+	if len(args) < 1 || len(args) > 3 {
+		return fail(e, "usage: tau hook-env <shell> [applied] [config-dir]")
 	}
 	shell := args[0]
-	if !slices.Contains(render.SupportedShells, shell) {
-		return fail(e, "unsupported shell %q (supported: %s)", shell, strings.Join(render.SupportedShells, ", "))
+	if !shellreg.IsSupported(shell) {
+		return fail(e, "unsupported shell %q (supported: %s)", shell, strings.Join(shellreg.Supported, ", "))
 	}
 
 	prev, _ := parseHookToken(os.Getenv("TAUGRES_HOOK"))
@@ -1639,7 +770,7 @@ func runHookEnv(e *Env, args []string) int {
 	// its unexported _TAU_APPLIED, which a child shell does not inherit (nor the
 	// aliases/functions), so an inherited "applied" token re-activates there.
 	// When the arg is absent (a shim from an older tau), trust the claim.
-	if len(args) == 2 {
+	if len(args) >= 2 {
 		prev.applied = prev.applied && args[1] == "1"
 	}
 
@@ -1676,7 +807,11 @@ func runHookEnv(e *Env, args []string) int {
 		teardown = deactivateScript(prev.proj)
 	}
 
-	d, err := discover.Discover(e.Wd)
+	hint := ""
+	if len(args) == 3 {
+		hint = args[2]
+	}
+	d, err := discoverForHook(e.Wd, hint)
 	if err != nil {
 		// Outside any project: tear down whatever this shell applied and forget.
 		if prev.applied {
@@ -1705,25 +840,27 @@ func runHookEnv(e *Env, args []string) int {
 
 	// Auto-sync when stale and trusted, guarded by the retry fingerprint: after a
 	// failed sync fp is non-empty and the attempt is not repeated until the
-	// trigger state (inputs, script/tool-dir presence, probes) changes; a
-	// successful sync clears it. The sync's own output goes to stderr; our stdout
-	// stays eval-clean.
+	// trigger state changes. InspectHook parses state once and reuses the activate
+	// script stat as the token stamp.
 	fp := ""
+	inspection := state.HookInspection{ActivationPath: filepath.Join(state.GenDir(stateDir), "activate."+shell)}
 	if trusted {
-		if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && need {
-			cur := state.SyncFingerprint(stateDir, d.ConfigPath, render.SupportedShells)
+		inspection = state.InspectHook(stateDir, d.ConfigPath, shell)
+		if inspection.NeedsSync {
+			fingerprint := state.SyncFingerprint(stateDir, d.ConfigPath, shellreg.Supported)
 			last := ""
 			if prev.proj == proj {
 				last = prev.fp
 			}
-			if cur == last {
+			if fingerprint == last {
 				fp = last // same failing state: do not retry
 			} else {
-				runSync(&Env{Stdout: e.Stderr, Stderr: e.Stderr, Wd: e.Wd}, []string{"--if-stale"})
-				if need, err := state.NeedsSync(stateDir, d.ConfigPath); err == nil && !need {
+				syncProject(&Env{Stdout: e.Stderr, Stderr: e.Stderr, Wd: e.Wd, Ctx: e.ctx()}, syncOptions{ifStale: true})
+				inspection = state.InspectHook(stateDir, d.ConfigPath, shell)
+				if !inspection.NeedsSync {
 					fp = "" // success
 				} else {
-					fp = state.SyncFingerprint(stateDir, d.ConfigPath, render.SupportedShells)
+					fp = state.SyncFingerprint(stateDir, d.ConfigPath, shellreg.Supported)
 				}
 			}
 		}
@@ -1731,11 +868,8 @@ func runHookEnv(e *Env, args []string) int {
 
 	// Target state: apply proj's activate script iff trusted and (after the
 	// possible sync) the script exists.
-	activate := filepath.Join(state.GenDir(stateDir), "activate."+shell)
-	stamp := ""
-	if fi, err := os.Stat(activate); err == nil {
-		stamp = strconv.FormatInt(fi.ModTime().UnixNano(), 10)
-	}
+	activate := inspection.ActivationPath
+	stamp := inspection.ActivationStamp
 	cur := hookToken{applied: trusted && stamp != "", stamp: stamp, fp: fp, proj: proj}
 	if cur == prev {
 		return 0 // nothing changed — the common case
@@ -1770,6 +904,29 @@ func runHookEnv(e *Env, args []string) int {
 		}
 	}
 	return 0
+}
+
+// discoverForHook uses the config directory already found by the pure-shell
+// gate, avoiding a second upward walk from a deeply nested working directory.
+// Invalid or out-of-tree hints fall back to normal discovery.
+func discoverForHook(wd, hint string) (*discover.Discovery, error) {
+	if hint == "" {
+		return discover.Discover(wd)
+	}
+	absWD, wdErr := filepath.Abs(wd)
+	absHint, hintErr := filepath.Abs(hint)
+	if wdErr != nil || hintErr != nil {
+		return discover.Discover(wd)
+	}
+	rel, err := filepath.Rel(absHint, absWD)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return discover.Discover(wd)
+	}
+	d, err := discover.Discover(absHint)
+	if err != nil || d.ProjectRoot != filepath.Clean(absHint) {
+		return discover.Discover(wd)
+	}
+	return d, nil
 }
 
 // --- allow / deny ---

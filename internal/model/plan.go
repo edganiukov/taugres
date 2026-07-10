@@ -5,6 +5,8 @@ package model
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
+	"slices"
 )
 
 // SourceFunc describes a single shell function. Its body comes from either a
@@ -167,6 +169,10 @@ type Plan struct {
 	// UvPackages declared with uv.install(...), in declaration order.
 	UvPackages []Package `json:"uvPackages,omitempty"`
 
+	// PackageManagers is the extensible manager-keyed declaration view. The
+	// built-in fields above remain for lock/config JSON compatibility.
+	PackageManagers map[string][]Package `json:"packageManagers,omitempty"`
+
 	// PipDir is the project-local pip virtualenv (<stateDir>/tools/pip). It is
 	// set when PipPackages is non-empty; its bin/ is auto-prepended to PATH.
 	PipDir string `json:"pipDir,omitempty"`
@@ -180,11 +186,81 @@ type Plan struct {
 	UvDir string `json:"uvDir,omitempty"`
 }
 
-// NewPlan returns an empty plan with initialized maps.
+// EvaluatedPlan names the phase produced directly by Starlark evaluation.
+// It remains an alias for source compatibility while APIs can document phase.
+type EvaluatedPlan = Plan
+
+// ResolvedPlan is a private mutable copy prepared by sync after versions,
+// manager directories, and static deferred values have been resolved. Renderers
+// accept this phase so evaluation output is never mutated in place.
+type ResolvedPlan struct {
+	*Plan
+	ManagerDirs map[string][]string
+}
+
+// ResolvePlan deep-copies an evaluated plan into the sync/render phase.
+func ResolvePlan(evaluated *EvaluatedPlan) *ResolvedPlan {
+	plan := *evaluated
+	plan.EnvSet = maps.Clone(evaluated.EnvSet)
+	plan.EnvUnset = slices.Clone(evaluated.EnvUnset)
+	plan.PathPrepend = slices.Clone(evaluated.PathPrepend)
+	plan.PathAppend = slices.Clone(evaluated.PathAppend)
+	plan.Aliases = maps.Clone(evaluated.Aliases)
+	plan.MiseTools = slices.Clone(evaluated.MiseTools)
+	plan.PipPackages = slices.Clone(evaluated.PipPackages)
+	plan.NpmPackages = slices.Clone(evaluated.NpmPackages)
+	plan.UvPackages = slices.Clone(evaluated.UvPackages)
+	plan.PackageManagers = make(map[string][]Package, len(evaluated.PackageManagers))
+	for manager, packages := range evaluated.PackageManagers {
+		plan.PackageManagers[manager] = slices.Clone(packages)
+	}
+
+	plan.DeferredEnv = make([]DeferredEnv, len(evaluated.DeferredEnv))
+	for i, deferred := range evaluated.DeferredEnv {
+		plan.DeferredEnv[i] = deferred
+		plan.DeferredEnv[i].Segments = slices.Clone(deferred.Segments)
+	}
+	plan.SourceFuncs = make(map[string][]SourceFunc, len(evaluated.SourceFuncs))
+	for name, entries := range evaluated.SourceFuncs {
+		cloned := make([]SourceFunc, len(entries))
+		for i, entry := range entries {
+			cloned[i] = entry
+			cloned[i].Shells = slices.Clone(entry.Shells)
+		}
+		plan.SourceFuncs[name] = cloned
+	}
+	plan.Hooks = make([]HookScript, len(evaluated.Hooks))
+	for i, hook := range evaluated.Hooks {
+		plan.Hooks[i] = hook
+		plan.Hooks[i].Shells = slices.Clone(hook.Shells)
+	}
+
+	return &ResolvedPlan{Plan: &plan, ManagerDirs: map[string][]string{}}
+}
+
+// NewPlan returns an empty evaluated plan with initialized maps.
 func NewPlan() *Plan {
 	return &Plan{
-		EnvSet:      map[string]string{},
-		Aliases:     map[string]string{},
-		SourceFuncs: map[string][]SourceFunc{},
+		EnvSet:          map[string]string{},
+		Aliases:         map[string]string{},
+		SourceFuncs:     map[string][]SourceFunc{},
+		PackageManagers: map[string][]Package{},
 	}
+}
+
+// Packages returns declarations for manager, preferring the extensible map and
+// falling back to the original built-in fields for source compatibility.
+func (p *Plan) Packages(manager string) []Package {
+	if packages, ok := p.PackageManagers[manager]; ok {
+		return packages
+	}
+	switch manager {
+	case "pip":
+		return p.PipPackages
+	case "npm":
+		return p.NpmPackages
+	case "uv":
+		return p.UvPackages
+	}
+	return nil
 }

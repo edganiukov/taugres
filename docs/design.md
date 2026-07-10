@@ -23,9 +23,10 @@ must feel instant. Hard target: **a common directory change ≤ 20ms**.
 How the design meets it:
 
 - Prompts outside any project are **pure shell** — a config-dir walk, no
-  subprocess. In-project prompts run one warm `tau hook-env` exec (~2–3ms
+  subprocess. In-project prompts run one warm `tau hook-env` exec (~1–3ms
   measured; see `internal/cli/hook_perf_test.go`) that does the staleness check
-  in-process and prints nothing when the state is unchanged.
+  in-process and prints nothing when the state is unchanged. The shell passes
+  its discovered config directory to Go, avoiding a duplicate upward walk.
 - Expensive work (Starlark evaluation, package installs, network) happens only
   in `tau sync`, which `hook-env` invokes **only when a cheap staleness check
   trips**.
@@ -137,8 +138,10 @@ and Deferred).
 
 Generated `activate.<shell>` sets env/PATH/aliases/functions and runs hooks,
 saving prior values into uniquely-prefixed helper variables. `deactivate.<shell>`
-restores them. Collisions are handled conservatively: existing
-aliases/functions are not overwritten (a warning is printed).
+restores them. Aliases intentionally take precedence while active: an existing
+alias/function of the same name is serialized, overwritten, and restored on deactivation.
+`shell.fn` collisions remain conservative: an existing function is kept and a
+warning is printed.
 
 The shell hook tracks the active project. Entering a different project sources
 the previous project's deactivate script (which matches how it was activated),
@@ -169,8 +172,8 @@ command and propagates its exit code.
 Install once per shell (see [reference.md](reference.md#installing-the-shell-hook)
 for the exact snippets).
 
-Wiring: zsh uses `chpwd`+`precmd`; fish uses the `fish_prompt` event; bash has
-no native prompt hook, so the snippet installs itself into `PROMPT_COMMAND`,
+Wiring: zsh uses `precmd`; fish uses the `fish_prompt` event; bash has no native
+prompt hook, so the snippet installs itself into `PROMPT_COMMAND`,
 preserving any existing scalar or array (bash ≥ 5.1) value.
 
 The hook itself is a **minimal shim** (direnv-style) — it holds no state machine
@@ -194,32 +197,37 @@ it — but aliases/functions don't survive a fork — so the shim also keeps an
 inherited "applied" claim reconciles to false and the nested shell re-activates.
 
 This is both simpler and faster than the previous pure-shell hook, which parsed
-the manifest with builtins on every prompt: one warm Go exec (~2–3ms) beats the
+the manifest with builtins on every prompt: one warm Go exec (~1–3ms) beats the
 shell loop plus the `stat` subprocess it needed for its activation stamp
-(~4–5ms), and it stays flat as the manifest grows.
+(~4–5ms), and it stays flat as the manifest grows. A steady-state subprocess
+benchmark and an in-process state benchmark guard both layers.
 
 ### Staleness checks
 
-Staleness is a set of independent dimensions, all recorded in one file —
-`.taugres/gen/manifest` — written at the end of a sync (its own mtime is the
-"last synced" anchor):
+Staleness is a set of independent dimensions, all recorded in one versioned
+file — `.taugres/gen/manifest` — atomically written at the end of a sync:
 
 ```
-input:<sha256>:<abs-path>     a config input (config file, load(...) module, shell.fn/shell.hook/shell.dotenv file)
-tooldir:<abs-path>            a tool bin dir that must exist
-probe:<kind>|<arg>|<result>   an exists()/which()/env() observation
-toolsig:<mgr>:<sha256>        per-manager fingerprint of its tools + locked versions
+version:2                                      manifest schema
+input:<sha256>:<mtime>:<size>:<ctime>:<path>   config/lock/source input and cheap stat identity
+tooldir:<abs-path>                             a tool bin dir that must exist
+managerdir:<mgr>:<abs-path>                    explicit ownership of a tool bin dir
+probe:<kind>|<arg>|<result>                    an exists()/which()/env() observation
+toolsig:<mgr>:<sha256>                         completed manager fingerprint
+toolpending:<mgr>                              latest manager install did not complete
 ```
 
 | Dimension | Drift when… |
 | --- | --- |
-| input | a config input's mtime is newer than the manifest (`NeedsSync`) or its content hash changed (`tau status`) |
+| input | a config input's recorded stat identity changes in either direction, or its content hash differs during a thorough check |
 | tooldir | a recorded tool bin dir (mise store, pip/uv venv, npm prefix) is missing |
 | probe | an `exists()`/`which()`/`env()` result changed (a probed file appeared/vanished, a binary was installed/removed, an env var changed) |
+| toolpending | a manager's latest installation did not complete |
 
-The first three are the **env-trigger** dimensions (`state.NeedsSync`, run
-concurrently) that decide *whether* to sync. The `toolsig` lines drive *what
-work* a sync does — see Per-manager staleness.
+These are the **env-trigger** dimensions (`state.NeedsSync`) that decide
+*whether* to sync. They short-circuit in hot-path order without spawning
+per-prompt goroutines. The `toolsig` lines drive *what work* a sync does — see
+Per-manager staleness.
 
 An `env()` probe records a **hash** of the observed value (not the value), so
 secrets never land in the on-disk manifest and a value containing `|` can't
@@ -232,7 +240,7 @@ a footgun to avoid.
 **Retry guard.** A failed auto-sync must not be re-run on every prompt (it
 would re-evaluate Starlark and re-print its error). After a failed attempt,
 `hook-env` records a fingerprint of the trigger state (`state.SyncFingerprint`:
-newest input mtime, script/tool-dir presence, probe results) in the session
+input stat identities, script/tool-dir presence, pending managers, and probe results) in the session
 token and retries only when it changes — so the error prints once per shell per
 state, with no on-disk state at all. Untrusted projects need no guard: trust is
 re-checked in-process on every prompt (a stat), the sync is simply never
@@ -294,7 +302,7 @@ implies an implicit `mise.tool("python")`/`mise.tool("node")` (and `uv.install`
 an implicit `python` + `uv`). mise is a documented prerequisite (install: `curl
 https://mise.run | sh`), not something tau bootstraps — and only the `mise`
 binary on PATH is needed, since tau uses mise's store directly and never relies
-on `mise activate`. tau caps install parallelism at `mise.jobs(n)` (default 10)
+on `mise activate`. tau caps install parallelism at `mise.jobs(n)` (default 16)
 via `mise install --jobs n`, to limit bursts of unauthenticated GitHub API calls
 from the aqua/ubi backends.
 
@@ -327,9 +335,12 @@ and the resolved version.
 
 ### Execution
 
-Installs run during `tau sync` only. mise installs all tools in one batched
-invocation (mise parallelizes internally); pip, uv, and npm run **concurrently** with
-each other (independent prefixes) after mise completes. Installs are
+Installs run during `tau sync` only. Package integrations are compile-time
+registry entries carrying their runtime requirements, lock section, prefix,
+installer, uninstaller, and display rules; this keeps startup static and makes a
+new manager an isolated adapter rather than another sync switch. mise installs
+all tools in one batched invocation (mise parallelizes internally); pip, uv, and
+npm run **concurrently** with each other (independent prefixes) after mise completes. Installs are
 **best-effort**: a failure is reported but does not abort — the shell env (vars,
 PATH, aliases, functions) is always generated so the shell still works, and the
 tool can be retried. Tool output is shown only with `tau sync --verbose`;
@@ -356,10 +367,11 @@ forces the named managers (or all) at their locked versions — a clean reinstal
 (tau-owned pip/uv/npm prefixes are wiped and rebuilt; mise runs with `--force`).
 
 The signatures subsume per-manager freshness, so there are no separate `Fresh()`
-helpers. mise stays offline too: its store bin dirs are recovered from the
-recorded `tooldir:` lines (the pip/uv/npm dirs are deterministic project-local
-paths, so subtracting them leaves the mise dirs) and reused for PATH when mise is
-fresh — so an unchanged mise is never re-probed with `mise where`.
+helpers. A failed manager is recorded as `toolpending` without committing its new
+signature, so a normal manual sync retries it while hook retries remain guarded.
+mise stays offline too: manager-owned store bin dirs are recovered directly from
+`managerdir:mise:` lines and reused for PATH when mise is fresh — so an unchanged
+mise is never re-probed with `mise where`.
 
 If `mise` is missing, tool installs are skipped with a clear message and the env
 is still generated.

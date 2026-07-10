@@ -20,6 +20,8 @@ import (
 	"github.com/edganiukov/taugres/internal/discover"
 	"github.com/edganiukov/taugres/internal/model"
 	"github.com/edganiukov/taugres/internal/paths"
+	"github.com/edganiukov/taugres/internal/state"
+	"github.com/edganiukov/taugres/internal/toolmgr"
 )
 
 // defaultMiseJobs caps how many tools mise installs in parallel. A modest cap
@@ -30,11 +32,13 @@ const defaultMiseJobs = 16
 // Result is the output of evaluating a config, including the modules that were
 // loaded (for stale detection).
 type Result struct {
-	Plan          *model.Plan
-	LoadedModules []string      // absolute paths of loaded .tg modules
-	DotenvFiles   []string      // absolute paths of shell.dotenv(...) files (config inputs)
-	ReadFiles     []string      // absolute paths of read(...) files (config inputs)
-	Probes        []model.Probe // exists()/which()/env() observations, for stale detection
+	Plan          *model.EvaluatedPlan
+	LoadedModules []string                       // absolute paths of loaded .tg modules
+	DotenvFiles   []string                       // absolute paths of shell.dotenv(...) files (config inputs)
+	ReadFiles     []string                       // absolute paths of read(...) files (config inputs)
+	Probes        []model.Probe                  // exists()/which()/env() observations, for stale detection
+	InputHashes   map[string]string              // hashes of the exact bytes evaluation consumed
+	InputMetadata map[string]state.InputMetadata // matching fd metadata for manifest writes
 }
 
 // Evaluate evaluates the active config file into a normalized plan. Imports may
@@ -42,7 +46,7 @@ type Result struct {
 func Evaluate(d *discover.Discovery) (*Result, error) {
 	b := newBuilder(d)
 
-	src, err := os.ReadFile(d.ConfigPath)
+	src, err := b.readInput(d.ConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
@@ -60,7 +64,15 @@ func Evaluate(d *discover.Discovery) (*Result, error) {
 		return nil, err
 	}
 
-	return &Result{Plan: plan, LoadedModules: b.loadedList(), DotenvFiles: b.dotenvFiles, ReadFiles: b.readFiles, Probes: b.probes}, nil
+	return &Result{
+		Plan:          plan,
+		LoadedModules: b.loadedList(),
+		DotenvFiles:   b.dotenvFiles,
+		ReadFiles:     b.readFiles,
+		Probes:        b.probes,
+		InputHashes:   b.inputHashes,
+		InputMetadata: b.inputMetadata,
+	}, nil
 }
 
 type loadEntry struct {
@@ -87,11 +99,14 @@ type builder struct {
 	npmPackages []model.Package
 	uvPackages  []model.Package
 
-	aliases     map[string]string
-	sourceFuncs map[string][]model.SourceFunc
-	hooks       []model.HookScript
-	loaded      map[string]bool
-	loadCache   map[string]*loadEntry
+	aliases           map[string]string
+	sourceFuncs       map[string][]model.SourceFunc
+	hooks             []model.HookScript
+	loaded            map[string]bool
+	loadCache         map[string]*loadEntry
+	predeclaredValues starlark.StringDict
+	inputHashes       map[string]string
+	inputMetadata     map[string]state.InputMetadata
 
 	// dotenvFiles records shell.dotenv(...) file paths (deduped) so sync can hash
 	// them as config inputs and re-sync when they change.
@@ -110,16 +125,18 @@ type builder struct {
 
 func newBuilder(d *discover.Discovery) *builder {
 	return &builder{
-		disc:        d,
-		envSet:      map[string]string{},
-		aliases:     map[string]string{},
-		sourceFuncs: map[string][]model.SourceFunc{},
-		loaded:      map[string]bool{},
-		loadCache:   map[string]*loadEntry{},
-		dotenvSeen:  map[string]bool{},
-		readSeen:    map[string]bool{},
-		probeSeen:   map[string]bool{},
-		miseJobs:    defaultMiseJobs,
+		disc:          d,
+		envSet:        map[string]string{},
+		aliases:       map[string]string{},
+		sourceFuncs:   map[string][]model.SourceFunc{},
+		loaded:        map[string]bool{},
+		loadCache:     map[string]*loadEntry{},
+		dotenvSeen:    map[string]bool{},
+		readSeen:      map[string]bool{},
+		probeSeen:     map[string]bool{},
+		inputHashes:   map[string]string{},
+		inputMetadata: map[string]state.InputMetadata{},
+		miseJobs:      defaultMiseJobs,
 	}
 }
 
@@ -132,8 +149,25 @@ func (b *builder) loadedList() []string {
 	return out
 }
 
+func (b *builder) readInput(path string) ([]byte, error) {
+	data, hash, metadata, err := state.ReadInput(path)
+	if err != nil {
+		return nil, err
+	}
+	if previous, ok := b.inputHashes[path]; ok && previous != hash {
+		return nil, fmt.Errorf("input changed during evaluation: %s", path)
+	}
+	b.inputHashes[path] = hash
+	b.inputMetadata[path] = metadata
+	return data, nil
+}
+
 // predeclared returns the global environment exposed to config files.
 func (b *builder) predeclared() starlark.StringDict {
+	if b.predeclaredValues != nil {
+		return b.predeclaredValues
+	}
+
 	// All shell-facing configuration is grouped under the `shell` namespace.
 	shellPath := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
 		"prepend": b.builtin("shell.path.prepend", b.pathPrependFn),
@@ -173,7 +207,7 @@ func (b *builder) predeclared() starlark.StringDict {
 		"arch": starlark.String(platformArch()),
 	})
 
-	return starlark.StringDict{
+	b.predeclaredValues = starlark.StringDict{
 		"project":  b.builtin("project", b.projectFn),
 		"exists":   b.builtin("exists", b.existsFn),
 		"which":    b.builtin("which", b.whichFn),
@@ -186,6 +220,7 @@ func (b *builder) predeclared() starlark.StringDict {
 		"npm":      npmModule,
 		"platform": platformModule,
 	}
+	return b.predeclaredValues
 }
 
 func (b *builder) builtin(name string, fn func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error)) *starlark.Builtin {
@@ -286,7 +321,7 @@ func (b *builder) readFn(_ *starlark.Thread, fn *starlark.Builtin, args starlark
 	if err != nil {
 		return nil, err
 	}
-	data, readErr := os.ReadFile(resolved)
+	data, readErr := b.readInput(resolved)
 	b.recordProbe("exists", resolved, boolResult(readErr == nil))
 	if readErr != nil {
 		if s, ok := starlark.AsString(def); ok {
@@ -319,7 +354,7 @@ func (b *builder) dotenvFn(_ *starlark.Thread, fn *starlark.Builtin, args starla
 		return nil, err
 	}
 
-	data, err := os.ReadFile(resolved)
+	data, err := b.readInput(resolved)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", fn.Name(), err)
 	}
@@ -717,7 +752,7 @@ func (b *builder) loadModule(module, baseDir string) (starlark.StringDict, error
 	// Mark in-progress to detect cycles.
 	b.loadCache[abs] = nil
 
-	src, err := os.ReadFile(abs)
+	src, err := b.readInput(abs)
 	if err != nil {
 		return nil, fmt.Errorf("loading module %q: %w", module, err)
 	}
@@ -751,20 +786,29 @@ func (b *builder) finalize() (*model.Plan, error) {
 	p.PipPackages = b.pipPackages
 	p.NpmPackages = b.npmPackages
 	p.UvPackages = b.uvPackages
+	if len(b.pipPackages) > 0 {
+		p.PackageManagers[toolmgr.Pip] = b.pipPackages
+	}
+	if len(b.npmPackages) > 0 {
+		p.PackageManagers[toolmgr.Npm] = b.npmPackages
+	}
+	if len(b.uvPackages) > 0 {
+		p.PackageManagers[toolmgr.Uv] = b.uvPackages
+	}
 
-	// pip/uv/npm run on a toolchain that tau provisions via mise, so declaring packages implies the matching runtime:
-	// pip/uv -> python, npm -> node, and uv also needs the uv binary. Add these implicitly unless already pinned.
+	// Package-manager runtime requirements are provisioned uniformly through
+	// mise. Each registry descriptor declares its capabilities; explicit user
+	// declarations still win and keep their requested version.
 	tools := append([]model.MiseTool{}, b.miseTools...)
-	if (len(b.pipPackages) > 0 || len(b.uvPackages) > 0) && !hasMiseTool(tools, "python") {
-		tools = append(tools, model.MiseTool{Name: "python"})
-	}
-
-	if len(b.npmPackages) > 0 && !hasMiseTool(tools, "node") {
-		tools = append(tools, model.MiseTool{Name: "node"})
-	}
-
-	if len(b.uvPackages) > 0 && !hasMiseTool(tools, "uv") {
-		tools = append(tools, model.MiseTool{Name: "uv"})
+	for _, manager := range toolmgr.PackageManagers {
+		if len(manager.Packages(p)) == 0 {
+			continue
+		}
+		for _, requirement := range manager.Requirements {
+			if !hasMiseTool(tools, requirement) {
+				tools = append(tools, model.MiseTool{Name: requirement})
+			}
+		}
 	}
 
 	p.MiseTools = tools

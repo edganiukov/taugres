@@ -861,3 +861,26 @@ shell.path.prepend("//bin")
 		t.Errorf("expected bin/ once in PathPrepend, got %d in %v", count, res.Plan.PathPrepend)
 	}
 }
+
+func TestEvaluateCapturesInputSnapshots(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	configPath := testutil.WriteFile(t, dir, "workspace.tg", `
+load("//lib.tg", "configure")
+configure()
+shell.dotenv("//vars.env")
+shell.env("READ_VALUE", read("//value.txt").strip())
+`)
+	modulePath := testutil.WriteFile(t, dir, "lib.tg", "def configure():\n    shell.env(\"MODULE\", \"yes\")\n")
+	dotenvPath := testutil.WriteFile(t, dir, "vars.env", "DOTENV=yes\n")
+	readPath := testutil.WriteFile(t, dir, "value.txt", "tracked\n")
+
+	res := evalWorkspace(t, dir)
+	for _, path := range []string{configPath, modulePath, dotenvPath, readPath} {
+		if res.InputHashes[path] == "" {
+			t.Errorf("missing hash for %s", path)
+		}
+		if metadata, ok := res.InputMetadata[path]; !ok || metadata.Size == 0 {
+			t.Errorf("missing metadata for %s: %+v", path, metadata)
+		}
+	}
+}

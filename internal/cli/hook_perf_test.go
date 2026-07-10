@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 
 // TestHookTransitionPerformance times the transition cycle
 // outside -> workspace -> nested -> workspace -> outside and asserts it stays
-// well under the 100ms-per-change target. Each in-project prompt runs one
+// under the 20ms-per-change product target. Each in-project prompt runs one
 // `tau hook-env` (all logic in Go); prompts outside any project are pure shell.
 func TestHookTransitionPerformance(t *testing.T) {
 	bash, err := exec.LookPath("bash")
@@ -78,14 +79,59 @@ done
 	perTransition := elapsed / time.Duration(transitions)
 	t.Logf("total=%s for %d transitions, ~%s each", elapsed, transitions, perTransition)
 
-	if perTransition > 100*time.Millisecond {
-		t.Errorf("per-transition time %s exceeds 100ms target", perTransition)
+	if perTransition > 20*time.Millisecond {
+		t.Errorf("per-transition time %s exceeds 20ms target", perTransition)
 	}
 }
 
 // TestHookOutsideProjectDoesNotSpawn asserts the fast path stays pure shell:
 // a prompt outside any project (with nothing active) must not exec tau. It
 // points _TAU_BIN at a nonexistent binary so any spawn would error loudly.
+func BenchmarkHookEnvSteadyState(b *testing.B) {
+	tau := builtTau(b)
+	cfgHome := b.TempDir()
+	repo := testutil.TempWorkspace(b)
+	testutil.WriteFile(b, repo, "workspace.tg", "project(\"bench\")\nshell.env(\"A\", \"b\")\n")
+	deep := filepath.Join(repo, "a", "b", "c", "d")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		b.Fatal(err)
+	}
+	env := append(os.Environ(), "XDG_CONFIG_HOME="+cfgHome)
+	for _, subcommand := range []string{"allow", "sync"} {
+		cmd := exec.Command(tau, subcommand)
+		cmd.Dir = repo
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			b.Fatalf("tau %s: %v\n%s", subcommand, err, out)
+		}
+	}
+
+	// Let bash evaluate the first transition and return only the exported token.
+	setup := exec.Command("bash", "--noprofile", "--norc", "-c",
+		`eval "$("$TAU" hook-env bash "" "$PROJECT")"; printf '%s' "$TAUGRES_HOOK"`)
+	setup.Dir = deep
+	setup.Env = append(env, "TAU="+tau, "PROJECT="+repo)
+	token, err := setup.Output()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	steadyEnv := append(env, "TAUGRES_HOOK="+string(token))
+	b.ResetTimer()
+	for range b.N {
+		cmd := exec.Command(tau, "hook-env", "bash", "1", repo)
+		cmd.Dir = deep
+		cmd.Env = steadyEnv
+		out, err := cmd.Output()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(out) != 0 {
+			b.Fatalf("steady hook emitted %q", out)
+		}
+	}
+}
+
 func TestHookOutsideProjectDoesNotSpawn(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {

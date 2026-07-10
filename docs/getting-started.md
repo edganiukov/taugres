@@ -20,8 +20,8 @@ the hook and it silently fails to install. On bash the hook installs itself into
 `PROMPT_COMMAND` so it runs on every `cd` (bash has no native directory-change
 hook); it preserves any existing `PROMPT_COMMAND` (scalar or the bash 5.1+ array
 form), but to be safe put the `eval` line **at the end of `~/.bashrc`**, after
-your own `PROMPT_COMMAND` setup. zsh uses `chpwd`+`precmd`; fish uses the
-`fish_prompt` event.
+your own `PROMPT_COMMAND` setup. zsh uses `precmd` (avoiding a duplicate
+`chpwd` invocation); fish uses the `fish_prompt` event.
 
 ### Auto-sync on `cd`
 
@@ -183,7 +183,7 @@ mise.tool([
 `@version` still applies (`"cargo:ripgrep@14.1.1"`). Backends that hit the GitHub
 API (`ubi`/`aqua`/github releases) need `GITHUB_TOKEN`/`MISE_GITHUB_TOKEN` set to
 avoid unauthenticated rate limits. tau also caps how many tools mise installs in
-parallel — default 10, override with `mise.jobs(n)` — which passes `--jobs n` to
+parallel — default 16, override with `mise.jobs(n)` — which passes `--jobs n` to
 `mise install` and helps avoid bursts of unauthenticated API calls.
 
 **mise is a hard dependency** for tools/packages: `pip`/`uv`/`npm` run on the
@@ -267,7 +267,7 @@ tools live in mise's shared store, so only their lock entry is dropped.
 Prompts outside any project are pure shell — a config-dir walk, no subprocess
 (<1ms). Inside a project, each prompt runs one `tau hook-env`, which does the
 staleness check in-process and prints nothing when the state is unchanged
-(~2–3ms; see `internal/cli/hook_perf_test.go`).
+(~1–3ms; see `internal/cli/hook_perf_test.go`).
 
 Real work happens only on real events:
 

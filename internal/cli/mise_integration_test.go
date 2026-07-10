@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/edganiukov/taugres/internal/lock"
 	"github.com/edganiukov/taugres/internal/testutil"
 )
 
@@ -79,6 +80,87 @@ func TestSyncSkipsUnchangedMiseInstall(t *testing.T) {
 	}
 	if n2 := installs(); n2 != n1 {
 		t.Errorf("second sync re-ran mise install (%d -> %d); expected it to be skipped", n1, n2)
+	}
+}
+
+func TestSyncRetriesFailedMiseInstall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake mise shell stub is POSIX-only")
+	}
+	isolate(t)
+
+	logFile := filepath.Join(t.TempDir(), "install.log")
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  install) echo call >> \"" + logFile + "\"; exit 1 ;;\n" +
+		"  where) exit 1 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "mise"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nmise.tool(\"bad@1\")\n")
+	if code, _, errOut := run(t, dir, "allow"); code != 0 {
+		t.Fatalf("allow: %s", errOut)
+	}
+	installs := func() int {
+		data, _ := os.ReadFile(logFile)
+		return strings.Count(string(data), "call")
+	}
+	if code, _, _ := run(t, dir, "sync"); code == 0 {
+		t.Fatal("first failed install unexpectedly succeeded")
+	}
+	first := installs()
+	if code, _, _ := run(t, dir, "sync"); code == 0 {
+		t.Fatal("second failed install unexpectedly succeeded")
+	}
+	if second := installs(); second <= first {
+		t.Fatalf("failed manager was marked fresh: install calls %d -> %d", first, second)
+	}
+	manifest, err := os.ReadFile(filepath.Join(dir, ".taugres", "gen", "manifest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(manifest), "toolpending:mise") {
+		t.Fatalf("manifest does not record pending mise install:\n%s", manifest)
+	}
+}
+
+func TestTargetedUpdatePreservesLockOnFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake mise shell stub is POSIX-only")
+	}
+	isolate(t)
+
+	binDir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$1\" in install) exit 1 ;; where) exit 1 ;; esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "mise"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nmise.tool(\"node\")\n")
+	file := lock.New()
+	file.Mise["node"] = lock.Entry{Requested: "", Resolved: "20.0.0"}
+	if err := file.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errOut := run(t, dir, "allow"); code != 0 {
+		t.Fatalf("allow: %s", errOut)
+	}
+	if code, _, _ := run(t, dir, "update", "node"); code == 0 {
+		t.Fatal("failed update unexpectedly succeeded")
+	}
+	got, err := lock.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry := got.Mise["node"]; entry.Resolved != "20.0.0" {
+		t.Fatalf("failed update changed lock entry: %+v", entry)
 	}
 }
 

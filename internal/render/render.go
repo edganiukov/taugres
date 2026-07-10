@@ -14,35 +14,36 @@ import (
 	"strings"
 
 	"github.com/edganiukov/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/shell"
 )
 
 // helperPrefix namespaces the shell variables used to save prior state.
 const helperPrefix = "__TAU_SAVE_"
 
 // SupportedShells lists shells the renderer can produce.
-var SupportedShells = []string{"bash", "zsh", "fish"}
+var SupportedShells = slices.Clone(shell.Supported)
 
 // Activate renders the activation script for the given shell.
-func Activate(p *model.Plan, shell string) (string, error) {
-	switch shell {
-	case "bash", "zsh":
-		return posixActivate(p, shell), nil
-	case "fish":
-		return fishActivate(p), nil
+func Activate(p *model.ResolvedPlan, shellName string) (string, error) {
+	switch shellName {
+	case shell.Bash, shell.Zsh:
+		return posixActivate(p.Plan, shellName), nil
+	case shell.Fish:
+		return fishActivate(p.Plan), nil
 	default:
-		return "", fmt.Errorf("unsupported shell for rendering: %q", shell)
+		return "", fmt.Errorf("unsupported shell for rendering: %q", shellName)
 	}
 }
 
 // Deactivate renders the deactivation script for the given shell.
-func Deactivate(p *model.Plan, shell string) (string, error) {
-	switch shell {
-	case "bash", "zsh":
-		return posixDeactivate(p, shell), nil
-	case "fish":
-		return fishDeactivate(p), nil
+func Deactivate(p *model.ResolvedPlan, shellName string) (string, error) {
+	switch shellName {
+	case shell.Bash, shell.Zsh:
+		return posixDeactivate(p.Plan, shellName), nil
+	case shell.Fish:
+		return fishDeactivate(p.Plan), nil
 	default:
-		return "", fmt.Errorf("unsupported shell for rendering: %q", shell)
+		return "", fmt.Errorf("unsupported shell for rendering: %q", shellName)
 	}
 }
 
@@ -141,12 +142,17 @@ func posixDeactivate(p *model.Plan, shell string) string {
 	fmt.Fprintln(w, "fi")
 	fmt.Fprintf(w, "unset %sPATH %sPATH__set\n\n", helperPrefix, helperPrefix)
 
-	// Remove aliases that Taugres created (only those it actually set).
-	fmt.Fprintln(w, "# --- remove aliases ---")
+	// Remove project aliases and restore definitions they overwrote.
+	fmt.Fprintln(w, "# --- restore aliases ---")
 	for _, name := range sortedKeys(p.Aliases) {
 		guard := helperPrefix + "ALIAS_" + sanitizeVar(name)
-		fmt.Fprintf(w, "if [ \"${%s:-}\" = 1 ]; then unalias %s 2>/dev/null; fi\n", guard, shellQuoteBare(name))
-		fmt.Fprintf(w, "unset %s\n", guard)
+		definition := guard + "__definition"
+		present := guard + "__set"
+		fmt.Fprintf(w, "if [ \"${%s:-}\" = 1 ]; then\n", guard)
+		fmt.Fprintf(w, "  unalias %s 2>/dev/null\n", shellQuoteBare(name))
+		fmt.Fprintf(w, "  if [ \"${%s:-}\" = 1 ]; then eval \"alias ${%s}\"; fi\n", present, definition)
+		fmt.Fprintln(w, "fi")
+		fmt.Fprintf(w, "unset %s %s %s\n", guard, definition, present)
 	}
 	fmt.Fprintln(w)
 
@@ -277,11 +283,20 @@ func renderAliases(w *strings.Builder, p *model.Plan) {
 	fmt.Fprintln(w, "# --- aliases ---")
 	for _, name := range sortedKeys(p.Aliases) {
 		guard := helperPrefix + "ALIAS_" + sanitizeVar(name)
+		definition := guard + "__definition"
+		present := guard + "__set"
 		qn := shellQuoteBare(name)
-		// The project's aliases win: always (re)define them, shadowing any
-		// existing alias or command for the duration of activation. Deactivation
-		// removes them again (unalias restores a shadowed command). Re-defining is
-		// also what lets reactivation refresh a stale definition.
+		// Project aliases intentionally win, but save an existing definition once
+		// so deactivation can restore the shell exactly.
+		fmt.Fprintf(w, "if [ -z \"${%s+x}\" ]; then\n", guard)
+		fmt.Fprintf(w, "  if alias %s >/dev/null 2>&1; then\n", qn)
+		fmt.Fprintf(w, "    %s=\"$(alias %s)\"\n", definition, qn)
+		fmt.Fprintf(w, "    %s=\"${%s#alias }\"\n", definition, definition)
+		fmt.Fprintf(w, "    %s=1\n", present)
+		fmt.Fprintln(w, "  else")
+		fmt.Fprintf(w, "    %s=0\n", present)
+		fmt.Fprintln(w, "  fi")
+		fmt.Fprintln(w, "fi")
 		fmt.Fprintf(w, "alias %s=%s\n", qn, shellQuote(p.Aliases[name]))
 		fmt.Fprintf(w, "%s=1\n", guard)
 	}
@@ -300,18 +315,19 @@ func renderFunctions(w *strings.Builder, p *model.Plan, shell string) {
 			continue
 		}
 		guard := helperPrefix + "FN_" + sanitizeVar(name)
-		// The project's functions win: always (re)define them (shadowing any
-		// existing command), so reactivation refreshes a stale definition.
-		// Deactivation removes them again.
+		fmt.Fprintf(w, "if typeset -f %s >/dev/null 2>&1; then\n", shellQuoteBare(name))
+		fmt.Fprintf(w, "  printf 'tau: warning: function %%s already exists; skipping\\n' %s >&2\n", shellQuote(name))
+		fmt.Fprintln(w, "else")
 		if e.File != "" {
 			// Body lives in a file, sourced with the caller's arguments.
-			fmt.Fprintf(w, "%s() { source %s \"$@\"; }\n", name, shellQuote(e.File))
+			fmt.Fprintf(w, "  %s() { source %s \"$@\"; }\n", name, shellQuote(e.File))
 		} else {
 			// Inline body embedded verbatim (shell ignores indentation), with
 			// surrounding blank lines trimmed.
-			fmt.Fprintf(w, "%s() {\n%s\n}\n", name, strings.Trim(e.Content, "\n"))
+			fmt.Fprintf(w, "  %s() {\n%s\n}\n", name, strings.Trim(e.Content, "\n"))
 		}
-		fmt.Fprintf(w, "%s=1\n", guard)
+		fmt.Fprintf(w, "  %s=1\n", guard)
+		fmt.Fprintln(w, "fi")
 	}
 	fmt.Fprintln(w)
 }
@@ -422,16 +438,11 @@ func shellQuoteBare(s string) string {
 	return shellQuote(s)
 }
 
-// sanitizeVar turns an arbitrary name into a valid shell variable suffix.
+// sanitizeVar hex-encodes a name into a collision-free shell variable suffix.
 func sanitizeVar(s string) string {
 	var b strings.Builder
-	for _, r := range s {
-		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('_')
-		}
+	for _, value := range []byte(s) {
+		fmt.Fprintf(&b, "%02x", value)
 	}
-
 	return b.String()
 }

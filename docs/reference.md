@@ -124,6 +124,11 @@ load("//taugres/lib/x.tg", "sym")   # root-anchored
 load("./lib/x.tg", "sym")           # relative to the importing file
 ```
 
+`shell.alias` deliberately overrides an alias (or fish function) with the same
+name while the project is active; tau saves and restores the previous definition
+on deactivation. `shell.fn` is conservative instead: an existing function is
+kept and a warning is printed.
+
 ### Pinning the pip/npm/uv runtime
 
 `pip`/`uv` run on the mise-provided `python`, `npm` on the mise-provided `node`,

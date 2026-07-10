@@ -11,12 +11,13 @@ import (
 	"strings"
 
 	"github.com/edganiukov/taugres/internal/model"
+	"github.com/edganiukov/taugres/internal/shell"
+	"github.com/edganiukov/taugres/internal/toolmgr"
 )
 
 var (
-	envNameRe   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	nameRe      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
-	validShells = map[string]bool{"bash": true, "zsh": true, "fish": true}
+	envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	nameRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
 )
 
 // Report is the result of validating a plan.
@@ -84,25 +85,16 @@ func Validate(p *model.Plan) *Report {
 		}
 	}
 
-	// Pip packages: names must be non-empty and free of whitespace.
-	for _, pkg := range p.PipPackages {
-		if strings.TrimSpace(pkg.Name) == "" {
-			r.Errors = append(r.Errors, "pip.install: empty package name")
-			continue
-		}
-		if strings.ContainsAny(pkg.Name, " \t") || strings.ContainsAny(pkg.Version, " \t") {
-			r.Errors = append(r.Errors, fmt.Sprintf("pip.install %q: name/version must not contain whitespace", pkg.Name))
-		}
-	}
-
-	// Npm packages: names must be non-empty and free of whitespace.
-	for _, pkg := range p.NpmPackages {
-		if strings.TrimSpace(pkg.Name) == "" {
-			r.Errors = append(r.Errors, "npm.install: empty package name")
-			continue
-		}
-		if strings.ContainsAny(pkg.Name, " \t") || strings.ContainsAny(pkg.Version, " \t") {
-			r.Errors = append(r.Errors, fmt.Sprintf("npm.install %q: name/version must not contain whitespace", pkg.Name))
+	// Package declarations are validated uniformly through the manager registry.
+	for _, manager := range toolmgr.PackageManagers {
+		for _, pkg := range manager.Packages(p) {
+			if strings.TrimSpace(pkg.Name) == "" {
+				r.Errors = append(r.Errors, manager.ID+".install: empty package name")
+				continue
+			}
+			if strings.ContainsAny(pkg.Name, " \t") || strings.ContainsAny(pkg.Version, " \t") {
+				r.Errors = append(r.Errors, fmt.Sprintf("%s.install %q: name/version must not contain whitespace", manager.ID, pkg.Name))
+			}
 		}
 	}
 
@@ -116,7 +108,7 @@ func Validate(p *model.Plan) *Report {
 				r.Errors = append(r.Errors, fmt.Sprintf("shell.fn %q: no shells specified", name))
 			}
 			for _, sh := range sf.Shells {
-				if !validShells[sh] {
+				if !shell.IsSupported(sh) {
 					r.Errors = append(r.Errors, fmt.Sprintf("shell.fn %q: unsupported shell %q", name, sh))
 				}
 			}
@@ -139,7 +131,7 @@ func Validate(p *model.Plan) *Report {
 			r.Errors = append(r.Errors, fmt.Sprintf("shell.hook #%d: no shells specified", i+1))
 		}
 		for _, sh := range h.Shells {
-			if !validShells[sh] {
+			if !shell.IsSupported(sh) {
 				r.Errors = append(r.Errors, fmt.Sprintf("shell.hook #%d: unsupported shell %q", i+1, sh))
 			}
 		}
@@ -158,7 +150,7 @@ func Validate(p *model.Plan) *Report {
 	// pip and uv both create Python venvs (.taugres/tools/pip and
 	// .taugres/tools/uv), each with its own `python`; mixing them splits packages
 	// across two disjoint environments. Steer toward one.
-	if len(p.PipPackages) > 0 && len(p.UvPackages) > 0 {
+	if len(p.Packages(toolmgr.Pip)) > 0 && len(p.Packages(toolmgr.Uv)) > 0 {
 		r.Warnings = append(r.Warnings,
 			"both pip.install and uv.install are used: they create separate venvs with separate `python`s, so packages are split across two environments — prefer one")
 	}

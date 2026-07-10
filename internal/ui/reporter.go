@@ -70,7 +70,7 @@ func (r *Reporter) show(msg string) {
 // Flush any trailing partial line via Done.
 func (r *Reporter) Stream(prefix string) io.Writer {
 	if !r.verbose {
-		return io.Discard
+		return nil
 	}
 
 	r.mu.Lock()
