@@ -61,12 +61,48 @@ func install(ctx context.Context, refs []string, jobs int, force bool, out io.Wr
 	return toolenv.Run(ctx, cmd, out, outputPrefix, "mise install "+strings.Join(refs, " "))
 }
 
+// execName derives the executable name from a tool name. Backend-qualified
+// names ("aqua:syncthing/syncthing", "go:github.com/x/tool") name the binary
+// by their last path segment; plain names are already the executable name.
+func execName(name string) string {
+	if i := strings.Index(name, ":"); i >= 0 {
+		name = name[i+1:]
+	}
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return name
+}
+
+// binPaths asks mise for the exact bin dirs it puts on PATH for the tool
+// (`mise bin-paths <ref>`). This is authoritative — mise resolves it from
+// backend metadata, matching `mise activate` — unlike the binDir heuristic.
+// Missing tools produce no output (mise warns on stderr but exits 0), so nil
+// means "unknown": callers fall back to the heuristic.
+func binPaths(ctx context.Context, t model.MiseTool) []string {
+	out, err := exec.CommandContext(ctx, Binary, "bin-paths", ref(t)).Output()
+	if err != nil {
+		return nil
+	}
+
+	var dirs []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			dirs = append(dirs, line)
+		}
+	}
+
+	return dirs
+}
+
 // binDir finds the directory holding a tool's executables within its install
-// dir. Layouts vary by backend: most tools use <install>/bin, some put the
+// dir. It is the fallback when `mise bin-paths` yields nothing (older mise).
+// Layouts vary by backend: most tools use <install>/bin, some put the
 // binary at the root, and archive backends (ubi) may extract into a nested dir
 // with no bin/ (e.g. uv -> <install>/uv-x86_64-unknown-linux-musl/uv). Keyed on
 // the tool name so there is no per-tool special case.
 func binDir(install, name string) string {
+	name = execName(name)
 	if b := filepath.Join(install, "bin"); toolenv.IsDir(b) {
 		return b
 	}
@@ -107,10 +143,17 @@ func ToolBinDirContext(ctx context.Context, name, version string) (string, error
 	if !Available() {
 		return "", fmt.Errorf("mise.where(%q) needs mise — install it with `curl https://mise.run | sh` (https://mise.jdx.dev)", name)
 	}
-	dir, err := where(ctx, model.MiseTool{Name: name, Version: version})
+
+	t := model.MiseTool{Name: name, Version: version}
+	if paths := binPaths(ctx, t); len(paths) > 0 {
+		return paths[0], nil
+	}
+
+	dir, err := where(ctx, t)
 	if err != nil {
 		return "", err
 	}
+
 	return binDir(dir, name), nil
 }
 
@@ -194,10 +237,17 @@ func Install(ctx context.Context, tools []model.MiseTool, jobs int, force bool, 
 			if err != nil {
 				return
 			}
+			// Prefer mise's own answer for the bin dir; fall back to the
+			// layout heuristic. Extra dirs (rare, asdf plugins) are dropped —
+			// same single-dir contract as the heuristic.
+			bin := binDir(dir, tool.Name)
+			if paths := binPaths(ctx, tool); len(paths) > 0 {
+				bin = paths[0]
+			}
 			resolved[i] = Installed{
 				Name:     tool.Name,
 				Resolved: filepath.Base(dir), // mise stores installs as <tool>/<version>
-				BinDir:   binDir(dir, tool.Name),
+				BinDir:   bin,
 			}
 			found[i] = true
 		})

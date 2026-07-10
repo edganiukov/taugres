@@ -14,17 +14,24 @@ import (
 )
 
 // fakeMise installs a stub mise whose `install` echoes two lines and whose
-// `where` points at store. It sets Binary to the stub for the test.
-func fakeMise(t *testing.T, store string) {
+// `where` points at store. `bin-paths` prints binPathsOut when non-empty;
+// otherwise it prints nothing, exercising the heuristic fallback (as an older
+// mise would). It sets Binary to the stub for the test.
+func fakeMise(t *testing.T, store, binPathsOut string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake mise stub is POSIX-only")
 	}
 	dir := t.TempDir()
+	binPathsCase := "  bin-paths) : ;;\n"
+	if binPathsOut != "" {
+		binPathsCase = "  bin-paths) echo \"" + binPathsOut + "\" ;;\n"
+	}
 	script := "#!/bin/sh\n" +
 		"case \"$1\" in\n" +
 		"  install) echo \"downloading $2\"; echo \"installed $2\" ;;\n" +
 		"  where) echo \"" + store + "/$(echo $2 | tr '@' '/')\" ;;\n" +
+		binPathsCase +
 		"esac\n"
 	bin := filepath.Join(dir, "mise")
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
@@ -38,7 +45,7 @@ func fakeMise(t *testing.T, store string) {
 func TestInstallReturnsResolvedAndStreams(t *testing.T) {
 	store := testutil.TempWorkspace(t)
 	testutil.WriteExec(t, store, "node/22/bin/node", "#!/bin/sh\n")
-	fakeMise(t, store)
+	fakeMise(t, store, "")
 
 	// mise writes its raw output to the provided writer; line prefixing is the
 	// caller's responsibility (see internal/ui Reporter/LinePrefixer).
@@ -62,10 +69,28 @@ func TestInstallReturnsResolvedAndStreams(t *testing.T) {
 func TestInstallQuietWhenOutNil(t *testing.T) {
 	store := testutil.TempWorkspace(t)
 	testutil.WriteExec(t, store, "node/22/bin/node", "#!/bin/sh\n")
-	fakeMise(t, store)
+	fakeMise(t, store, "")
 
 	if _, err := Install(context.Background(), []model.MiseTool{{Name: "node", Version: "22"}}, 0, false, nil, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInstallPrefersMiseBinPaths(t *testing.T) {
+	store := testutil.TempWorkspace(t)
+	// Nested aqua layout the heuristic can only find via execName; the
+	// authoritative `mise bin-paths` answer must win regardless.
+	testutil.WriteExec(t, store, "aqua-syncthing-syncthing/2.1.2/syncthing-macos-arm64-v2.1.2/syncthing", "#!/bin/sh\n")
+	want := filepath.Join(store, "aqua-syncthing-syncthing", "2.1.2", "syncthing-macos-arm64-v2.1.2")
+	fakeMise(t, store, want)
+
+	tools := []model.MiseTool{{Name: "aqua:syncthing/syncthing", Version: "2.1.2"}}
+	installed, err := Install(context.Background(), tools, 0, false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(installed) != 1 || installed[0].BinDir != want {
+		t.Errorf("installed = %+v, want BinDir %q", installed, want)
 	}
 }
 
@@ -118,5 +143,20 @@ func TestBinDirLayouts(t *testing.T) {
 	}
 	if got := binDir(empty, "whatever"); got != empty {
 		t.Errorf("fallback: got %q", got)
+	}
+}
+
+func TestExecName(t *testing.T) {
+	cases := map[string]string{
+		"node":                     "node",
+		"aqua:syncthing/syncthing": "syncthing",
+		"ubi:BurntSushi/ripgrep":   "ripgrep",
+		"go:github.com/x/tool":     "tool",
+		"npm:prettier":             "prettier",
+	}
+	for in, want := range cases {
+		if got := execName(in); got != want {
+			t.Errorf("execName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
