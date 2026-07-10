@@ -11,9 +11,9 @@ import (
 	"github.com/edganiukov/taugres/internal/testutil"
 )
 
-// writeFakeMise installs a stub `mise` on PATH that understands `install` and
-// `where`, backed by a fake install store. Returns nothing; adjusts PATH for
-// the test via t.Setenv.
+// writeFakeMise installs a stub `mise` on PATH that understands `install`,
+// `where`, and `bin-paths`, backed by a fake install store. Returns nothing;
+// adjusts PATH for the test via t.Setenv.
 func writeFakeMise(t *testing.T, store string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -24,6 +24,7 @@ func writeFakeMise(t *testing.T, store string) {
 		"case \"$1\" in\n" +
 		"  install) exit 0 ;;\n" +
 		"  where) echo \"" + store + "/$(echo $2 | tr '@' '/')\" ;;\n" +
+		"  bin-paths) echo \"" + store + "/$(echo $3 | tr '@' '/')/bin\" ;;\n" +
 		"esac\n"
 	mise := filepath.Join(binDir, "mise")
 	if err := os.WriteFile(mise, []byte(script), 0o755); err != nil {
@@ -51,6 +52,7 @@ func TestSyncSkipsUnchangedMiseInstall(t *testing.T) {
 		"case \"$1\" in\n" +
 		"  install) echo call >> \"" + logFile + "\"; mkdir -p \"" + store + "/node/1/bin\" ;;\n" +
 		"  where) echo \"" + store + "/node/1\" ;;\n" +
+		"  bin-paths) echo \"" + store + "/node/1/bin\" ;;\n" +
 		"esac\n"
 	if err := os.WriteFile(filepath.Join(binDir, "mise"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)

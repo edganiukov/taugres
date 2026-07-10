@@ -31,6 +31,7 @@ func TestAutosyncSkipsInstallsWhenToolsUnchanged(t *testing.T) {
 		"echo \"$@\" >> \"" + miseLog + "\"\n" +
 		"case \"$1\" in\n" +
 		"  where) echo \"" + store + "/$(echo $2 | tr '@' '/')\" ;;\n" +
+		"  bin-paths) echo \"" + store + "/$(echo $3 | tr '@' '/')/bin\" ;;\n" +
 		"esac\n"
 	if err := os.WriteFile(filepath.Join(fakeBin, "mise"), []byte(miseScript), 0o755); err != nil {
 		t.Fatal(err)
@@ -131,6 +132,7 @@ func TestAutosyncReinstallsOnlyChangedManager(t *testing.T) {
 		"echo \"$@\" >> \"" + miseLog + "\"\n" +
 		"case \"$1\" in\n" +
 		"  where) echo \"" + store + "/node/1\" ;;\n" +
+		"  bin-paths) echo \"" + store + "/node/1/bin\" ;;\n" +
 		"esac\n"
 	if err := os.WriteFile(filepath.Join(fakeBin, "mise"), []byte(miseScript), 0o755); err != nil {
 		t.Fatal(err)
@@ -520,6 +522,7 @@ func TestConcurrentEntryWaitsForInProgressSync(t *testing.T) {
 		"case \"$1\" in\n" +
 		"  install) sleep 1 ;;\n" +
 		"  where) echo \"" + store + "/$(echo $2 | tr '@' '/')\" ;;\n" +
+		"  bin-paths) echo \"" + store + "/$(echo $3 | tr '@' '/')/bin\" ;;\n" +
 		"esac\n"
 	if err := os.WriteFile(filepath.Join(fakeBin, "mise"), []byte(miseScript), 0o755); err != nil {
 		t.Fatal(err)

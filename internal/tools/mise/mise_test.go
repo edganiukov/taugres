@@ -13,10 +13,16 @@ import (
 	"github.com/edganiukov/taugres/internal/testutil"
 )
 
+// binPathsFail makes the fakeMise stub's `bin-paths` exit non-zero with an
+// error on stderr, exercising the error path.
+const binPathsFail = "\x00FAIL"
+
 // fakeMise installs a stub mise whose `install` echoes two lines and whose
-// `where` points at store. `bin-paths` prints binPathsOut when non-empty;
-// otherwise it prints nothing, exercising the heuristic fallback (as an older
-// mise would). It sets Binary to the stub for the test.
+// `where` points at store. `bin-paths` (invoked as `bin-paths --silent <ref>`)
+// prints binPathsOut when non-empty; when empty it prints nothing and exits 0,
+// as real mise does for a ref it cannot resolve, exercising the `mise where`
+// fallback; binPathsFail makes it fail. It sets Binary to the stub for the
+// test.
 func fakeMise(t *testing.T, store, binPathsOut string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -24,7 +30,11 @@ func fakeMise(t *testing.T, store, binPathsOut string) {
 	}
 	dir := t.TempDir()
 	binPathsCase := "  bin-paths) : ;;\n"
-	if binPathsOut != "" {
+	switch binPathsOut {
+	case "":
+	case binPathsFail:
+		binPathsCase = "  bin-paths) echo \"mise ERROR boom\" >&2; exit 1 ;;\n"
+	default:
 		binPathsCase = "  bin-paths) echo \"" + binPathsOut + "\" ;;\n"
 	}
 	script := "#!/bin/sh\n" +
@@ -45,7 +55,7 @@ func fakeMise(t *testing.T, store, binPathsOut string) {
 func TestInstallReturnsResolvedAndStreams(t *testing.T) {
 	store := testutil.TempWorkspace(t)
 	testutil.WriteExec(t, store, "node/22/bin/node", "#!/bin/sh\n")
-	fakeMise(t, store, "")
+	fakeMise(t, store, filepath.Join(store, "node", "22", "bin"))
 
 	// mise writes its raw output to the provided writer; line prefixing is the
 	// caller's responsibility (see internal/ui Reporter/LinePrefixer).
@@ -78,8 +88,8 @@ func TestInstallQuietWhenOutNil(t *testing.T) {
 
 func TestInstallPrefersMiseBinPaths(t *testing.T) {
 	store := testutil.TempWorkspace(t)
-	// Nested aqua layout the heuristic can only find via execName; the
-	// authoritative `mise bin-paths` answer must win regardless.
+	// Nested aqua layout: the authoritative `mise bin-paths` answer must win,
+	// not the install dir `mise where` reports.
 	testutil.WriteExec(t, store, "aqua-syncthing-syncthing/2.1.2/syncthing-macos-arm64-v2.1.2/syncthing", "#!/bin/sh\n")
 	want := filepath.Join(store, "aqua-syncthing-syncthing", "2.1.2", "syncthing-macos-arm64-v2.1.2")
 	fakeMise(t, store, want)
@@ -91,6 +101,133 @@ func TestInstallPrefersMiseBinPaths(t *testing.T) {
 	}
 	if len(installed) != 1 || installed[0].BinDir != want {
 		t.Errorf("installed = %+v, want BinDir %q", installed, want)
+	}
+}
+
+func TestInstallFallsBackToWhereWhenBinPathsEmpty(t *testing.T) {
+	store := testutil.TempWorkspace(t)
+	testutil.WriteExec(t, store, "node/22/bin/node", "#!/bin/sh\n")
+	fakeMise(t, store, "") // bin-paths prints nothing
+
+	installed, err := Install(context.Background(), []model.MiseTool{{Name: "node", Version: "22"}}, 0, false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(store, "node", "22")
+	if len(installed) != 1 || installed[0].BinDir != want {
+		t.Errorf("installed = %+v, want BinDir %q (the mise where install dir)", installed, want)
+	}
+}
+
+func TestInstallSurfacesBinPathsError(t *testing.T) {
+	store := testutil.TempWorkspace(t)
+	fakeMise(t, store, binPathsFail)
+
+	_, err := Install(context.Background(), []model.MiseTool{{Name: "node", Version: "22"}}, 0, false, nil, nil)
+	if err == nil {
+		t.Fatal("expected error when bin-paths fails")
+	}
+	if !strings.Contains(err.Error(), "could not install node@22") || !strings.Contains(err.Error(), "mise ERROR boom") {
+		t.Errorf("error should name the tool and surface mise's stderr, got: %v", err)
+	}
+}
+
+func TestToolBinDirUsesBinPaths(t *testing.T) {
+	store := testutil.TempWorkspace(t)
+	want := filepath.Join(store, "node", "22", "bin")
+	fakeMise(t, store, want)
+
+	got, err := ToolBinDir("node", "22")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("ToolBinDir = %q, want %q", got, want)
+	}
+}
+
+func TestToolBinDirFallsBackToWhere(t *testing.T) {
+	store := testutil.TempWorkspace(t)
+	fakeMise(t, store, "") // bin-paths prints nothing
+
+	got, err := ToolBinDir("node", "22")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(store, "node", "22"); got != want {
+		t.Errorf("ToolBinDir = %q, want %q (the mise where install dir)", got, want)
+	}
+}
+
+func TestToolBinDirRetriesBareRefWithResolvedVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake mise stub is POSIX-only")
+	}
+	store := testutil.TempWorkspace(t)
+	want := filepath.Join(store, "node", "22", "bin")
+	// Real mise prints nothing (exit 0) for a bare ref it cannot resolve, but
+	// answers once the concrete version is given — which `mise where` reports.
+	// The stub's bin-paths only answers refs carrying an explicit @version.
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  where) echo \"" + filepath.Join(store, "node", "22") + "\" ;;\n" +
+		"  bin-paths) case \"$3\" in *@*) echo \"" + want + "\" ;; esac ;;\n" +
+		"esac\n"
+	bin := filepath.Join(t.TempDir(), "mise")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := Binary
+	Binary = bin
+	t.Cleanup(func() { Binary = old })
+
+	got, err := ToolBinDir("node", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("ToolBinDir = %q, want %q (bin-paths retried with the resolved version)", got, want)
+	}
+}
+
+func TestToolBinDirErrorsWhenToolMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake mise stub is POSIX-only")
+	}
+	// Missing tools: bin-paths prints nothing but exits 0, so `mise where` —
+	// which does exit non-zero — is the error signal.
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  where) echo \"mise ERROR no version installed\" >&2; exit 1 ;;\n" +
+		"  bin-paths) : ;;\n" +
+		"esac\n"
+	bin := filepath.Join(t.TempDir(), "mise")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := Binary
+	Binary = bin
+	t.Cleanup(func() { Binary = old })
+
+	_, err := ToolBinDir("ghost", "1")
+	if err == nil {
+		t.Fatal("expected error for a missing tool")
+	}
+	if !strings.Contains(err.Error(), "mise where ghost@1") || !strings.Contains(err.Error(), "no version installed") {
+		t.Errorf("error should name the command and surface mise's stderr, got: %v", err)
+	}
+}
+
+func TestToolBinDirSurfacesBinPathsError(t *testing.T) {
+	store := testutil.TempWorkspace(t)
+	fakeMise(t, store, binPathsFail)
+
+	_, err := ToolBinDir("node", "22")
+	if err == nil {
+		t.Fatal("expected error when bin-paths fails")
+	}
+	if !strings.Contains(err.Error(), "mise bin-paths node@22") || !strings.Contains(err.Error(), "mise ERROR boom") {
+		t.Errorf("error should name the command and surface mise's stderr, got: %v", err)
 	}
 }
 
@@ -112,51 +249,4 @@ func TestInstallNoToolsIsNoop(t *testing.T) {
 	}
 }
 
-func TestBinDirLayouts(t *testing.T) {
-	root := testutil.TempWorkspace(t)
 
-	// Standard: <install>/bin/<tool>.
-	std := filepath.Join(root, "std")
-	testutil.WriteExec(t, std, "bin/node", "#!/bin/sh\n")
-	if got := binDir(std, "node"); got != filepath.Join(std, "bin") {
-		t.Errorf("bin/ layout: got %q", got)
-	}
-
-	// Root: <install>/<tool>.
-	rootLayout := filepath.Join(root, "rootl")
-	testutil.WriteExec(t, rootLayout, "rg", "#!/bin/sh\n")
-	if got := binDir(rootLayout, "rg"); got != rootLayout {
-		t.Errorf("root layout: got %q", got)
-	}
-
-	// Nested (ubi archive dir, no bin/): <install>/<sub>/<tool>.
-	nested := filepath.Join(root, "nested")
-	testutil.WriteExec(t, nested, "uv-x86_64-unknown-linux-musl/uv", "#!/bin/sh\n")
-	if got := binDir(nested, "uv"); got != filepath.Join(nested, "uv-x86_64-unknown-linux-musl") {
-		t.Errorf("nested layout: got %q", got)
-	}
-
-	// Unknown: fall back to the install dir.
-	empty := filepath.Join(root, "empty")
-	if err := os.MkdirAll(empty, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if got := binDir(empty, "whatever"); got != empty {
-		t.Errorf("fallback: got %q", got)
-	}
-}
-
-func TestExecName(t *testing.T) {
-	cases := map[string]string{
-		"node":                     "node",
-		"aqua:syncthing/syncthing": "syncthing",
-		"ubi:BurntSushi/ripgrep":   "ripgrep",
-		"go:github.com/x/tool":     "tool",
-		"npm:prettier":             "prettier",
-	}
-	for in, want := range cases {
-		if got := execName(in); got != want {
-			t.Errorf("execName(%q) = %q, want %q", in, got, want)
-		}
-	}
-}

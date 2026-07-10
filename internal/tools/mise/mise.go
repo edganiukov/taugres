@@ -9,9 +9,9 @@ package mise
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -61,28 +61,29 @@ func install(ctx context.Context, refs []string, jobs int, force bool, out io.Wr
 	return toolenv.Run(ctx, cmd, out, outputPrefix, "mise install "+strings.Join(refs, " "))
 }
 
-// execName derives the executable name from a tool name. Backend-qualified
-// names ("aqua:syncthing/syncthing", "go:github.com/x/tool") name the binary
-// by their last path segment; plain names are already the executable name.
-func execName(name string) string {
-	if i := strings.Index(name, ":"); i >= 0 {
-		name = name[i+1:]
+// cmdErr wraps a mise command failure, surfacing the stderr captured by
+// Output() so failures are diagnosable (exec.ExitError alone only says
+// "exit status N").
+func cmdErr(what string, err error) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		if msg := strings.TrimSpace(string(ee.Stderr)); msg != "" {
+			return fmt.Errorf("%s: %w: %s", what, err, msg)
+		}
 	}
-	if i := strings.LastIndex(name, "/"); i >= 0 {
-		name = name[i+1:]
-	}
-	return name
+	return fmt.Errorf("%s: %w", what, err)
 }
 
 // binPaths asks mise for the exact bin dirs it puts on PATH for the tool
-// (`mise bin-paths <ref>`). This is authoritative — mise resolves it from
-// backend metadata, matching `mise activate` — unlike the binDir heuristic.
-// Missing tools produce no output (mise warns on stderr but exits 0), so nil
-// means "unknown": callers fall back to the heuristic.
-func binPaths(ctx context.Context, t model.MiseTool) []string {
-	out, err := exec.CommandContext(ctx, Binary, "bin-paths", ref(t)).Output()
+// (`mise bin-paths --silent <ref>`). This is authoritative — mise resolves it
+// from backend metadata, matching `mise activate` — but it is not an installed
+// check: for a ref it cannot resolve it prints nothing and still exits 0
+// (--silent drops the warning noise). An empty, error-free result therefore
+// means "unknown"; only `mise where` reliably reports missing tools.
+func binPaths(ctx context.Context, t model.MiseTool) ([]string, error) {
+	out, err := exec.CommandContext(ctx, Binary, "bin-paths", "--silent", ref(t)).Output()
 	if err != nil {
-		return nil
+		return nil, cmdErr("mise bin-paths "+ref(t), err)
 	}
 
 	var dirs []string
@@ -92,48 +93,14 @@ func binPaths(ctx context.Context, t model.MiseTool) []string {
 		}
 	}
 
-	return dirs
-}
-
-// binDir finds the directory holding a tool's executables within its install
-// dir. It is the fallback when `mise bin-paths` yields nothing (older mise).
-// Layouts vary by backend: most tools use <install>/bin, some put the
-// binary at the root, and archive backends (ubi) may extract into a nested dir
-// with no bin/ (e.g. uv -> <install>/uv-x86_64-unknown-linux-musl/uv). Keyed on
-// the tool name so there is no per-tool special case.
-func binDir(install, name string) string {
-	name = execName(name)
-	if b := filepath.Join(install, "bin"); toolenv.IsDir(b) {
-		return b
-	}
-
-	if toolenv.IsExecutable(filepath.Join(install, name)) {
-		return install
-	}
-
-	// Look one level down for <sub>/<name> or <sub>/bin.
-	entries, _ := os.ReadDir(install)
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-
-		sub := filepath.Join(install, e.Name())
-		if toolenv.IsExecutable(filepath.Join(sub, name)) {
-			return sub
-		}
-		if b := filepath.Join(sub, "bin"); toolenv.IsDir(b) {
-			return b
-		}
-	}
-
-	return install
+	return dirs, nil
 }
 
 // ToolBinDir returns the directory holding a tool's executables — the same dir
-// Install prepends to PATH — resolved via `mise where`. version is the concrete
-// version to look up (a locked/resolved version, a pin, or "" for the active
-// one). It runs mise, so it belongs to sync, never activation.
+// Install prepends to PATH — resolved via `mise where` + `mise bin-paths`.
+// version is the concrete version to look up (a locked/resolved version, a
+// pin, or "" for the active one). It runs mise, so it belongs to sync, never
+// activation.
 func ToolBinDir(name, version string) (string, error) {
 	return ToolBinDirContext(context.Background(), name, version)
 }
@@ -144,24 +111,19 @@ func ToolBinDirContext(ctx context.Context, name, version string) (string, error
 		return "", fmt.Errorf("mise.where(%q) needs mise — install it with `curl https://mise.run | sh` (https://mise.jdx.dev)", name)
 	}
 
-	t := model.MiseTool{Name: name, Version: version}
-	if paths := binPaths(ctx, t); len(paths) > 0 {
-		return paths[0], nil
-	}
-
-	dir, err := where(ctx, t)
+	ins, err := resolve(ctx, model.MiseTool{Name: name, Version: version})
 	if err != nil {
 		return "", err
 	}
 
-	return binDir(dir, name), nil
+	return ins.BinDir, nil
 }
 
 // where returns the install directory for a tool via `mise where`.
 func where(ctx context.Context, t model.MiseTool) (string, error) {
 	out, err := exec.CommandContext(ctx, Binary, "where", ref(t)).Output()
 	if err != nil {
-		return "", fmt.Errorf("mise where %s: %w", ref(t), err)
+		return "", cmdErr("mise where "+ref(t), err)
 	}
 
 	dir := strings.TrimSpace(string(out))
@@ -182,6 +144,38 @@ type Installed struct {
 	Name     string // tool name
 	Resolved string // concrete resolved version (e.g. "22.11.0")
 	BinDir   string // directory holding its executables (for PATH)
+}
+
+// resolve locates an installed tool using only mise itself: `mise where` is
+// the authority on whether the tool is installed — unlike bin-paths it exits
+// non-zero when missing — and yields the concrete version; `mise bin-paths`
+// names the exact bin dir. bin-paths cannot always resolve a bare or partial
+// ref (empty output, exit 0), so it is retried with the concrete version from
+// where; if it still yields nothing, the install dir itself is used. Extra
+// bin-paths dirs (rare, asdf plugins) are dropped — single-dir contract.
+func resolve(ctx context.Context, t model.MiseTool) (Installed, error) {
+	dir, err := where(ctx, t)
+	if err != nil {
+		return Installed{}, err
+	}
+	version := filepath.Base(dir) // mise stores installs as <tool>/<version>
+
+	paths, err := binPaths(ctx, t)
+	if err != nil {
+		return Installed{}, err
+	}
+	if len(paths) == 0 && t.Version != version {
+		if paths, err = binPaths(ctx, model.MiseTool{Name: t.Name, Version: version}); err != nil {
+			return Installed{}, err
+		}
+	}
+
+	bin := dir
+	if len(paths) > 0 {
+		bin = paths[0]
+	}
+
+	return Installed{Name: t.Name, Resolved: version, BinDir: bin}, nil
 }
 
 // Install installs the given tools (each MiseTool.Version is the exact spec to
@@ -218,11 +212,11 @@ func Install(ctx context.Context, tools []model.MiseTool, jobs int, force bool, 
 		}
 	}
 
-	// Resolve whatever actually installed. `mise where` calls are independent,
-	// so run them concurrently (bounded by the configured install parallelism)
-	// while preserving declaration order in the result.
+	// Resolve whatever actually installed. The per-tool resolutions are
+	// independent, so run them concurrently (bounded by the configured install
+	// parallelism) while preserving declaration order in the result.
 	resolved := make([]Installed, len(tools))
-	found := make([]bool, len(tools))
+	errs := make([]error, len(tools))
 	limit := jobs
 	if limit <= 0 || limit > len(tools) {
 		limit = len(tools)
@@ -233,40 +227,26 @@ func Install(ctx context.Context, tools []model.MiseTool, jobs int, force bool, 
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			dir, err := where(ctx, tool)
-			if err != nil {
-				return
-			}
-			// Prefer mise's own answer for the bin dir; fall back to the
-			// layout heuristic. Extra dirs (rare, asdf plugins) are dropped —
-			// same single-dir contract as the heuristic.
-			bin := binDir(dir, tool.Name)
-			if paths := binPaths(ctx, tool); len(paths) > 0 {
-				bin = paths[0]
-			}
-			resolved[i] = Installed{
-				Name:     tool.Name,
-				Resolved: filepath.Base(dir), // mise stores installs as <tool>/<version>
-				BinDir:   bin,
-			}
-			found[i] = true
+			resolved[i], errs[i] = resolve(ctx, tool)
 		})
 	}
 	wg.Wait()
 
 	var installed []Installed
 	var missing []string
+	var failures []error
 	for i, tool := range tools {
-		if found[i] {
+		if errs[i] == nil {
 			installed = append(installed, resolved[i])
 		} else {
 			missing = append(missing, ref(tool))
+			failures = append(failures, errs[i])
 		}
 	}
 
 	finish(len(missing) == 0)
 	if len(missing) > 0 {
-		return installed, fmt.Errorf("mise: could not install %s", strings.Join(missing, ", "))
+		return installed, fmt.Errorf("mise: could not install %s: %w", strings.Join(missing, ", "), errors.Join(failures...))
 	}
 
 	return installed, nil
