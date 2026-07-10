@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/edganiukov/taugres/internal/state"
 	"github.com/edganiukov/taugres/internal/testutil"
 )
 
@@ -502,6 +503,48 @@ func TestUnknownCommand(t *testing.T) {
 	code, _, _ := run(t, t.TempDir(), "bogus")
 	if code != 2 {
 		t.Errorf("expected exit 2 for unknown command, got %d", code)
+	}
+}
+
+func TestCleanCacheDropsOnlyManifest(t *testing.T) {
+	isolate(t)
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"demo\")\nshell.env(\"A\", \"b\")\n")
+	if code, _, e := run(t, dir, "allow"); code != 0 {
+		t.Fatalf("allow: %s", e)
+	}
+	if code, _, e := run(t, dir, "sync"); code != 0 {
+		t.Fatalf("sync: %s", e)
+	}
+	// A tool prefix stands in for installed packages that must survive.
+	toolBin := filepath.Join(dir, ".taugres", "tools", "pip", "bin")
+	if err := os.MkdirAll(toolBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, _, e := run(t, dir, "clean", "--cache"); code != 0 {
+		t.Fatalf("clean --cache: %s", e)
+	}
+	stateDir := filepath.Join(dir, ".taugres")
+	if _, err := os.Stat(state.ManifestPath(stateDir)); !os.IsNotExist(err) {
+		t.Error("clean --cache should remove the manifest")
+	}
+	if _, err := os.Stat(toolBin); err != nil {
+		t.Error("clean --cache should keep installed tool prefixes")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".taugres", "gen", "activate.bash")); err != nil {
+		t.Error("clean --cache should keep generated scripts until the next sync")
+	}
+
+	// The dropped cache makes the project stale; a plain sync rebuilds it.
+	if need, _ := state.NeedsSync(stateDir, filepath.Join(dir, "workspace.tg")); !need {
+		t.Error("expected needs-sync after clean --cache")
+	}
+	if code, _, e := run(t, dir, "sync"); code != 0 {
+		t.Fatalf("resync: %s", e)
+	}
+	if _, err := os.Stat(state.ManifestPath(stateDir)); err != nil {
+		t.Error("resync should rewrite the manifest")
 	}
 }
 

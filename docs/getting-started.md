@@ -258,7 +258,7 @@ tools live in mise's shared store, so only their lock entry is dropped.
 | `tau activate [shell]` | print the activation script for a trusted project (default: `$SHELL`) |
 | `tau deactivate [shell]` | print the deactivation script for a trusted project (default: `$SHELL`) |
 | `tau allow` / `tau deny` | trust / revoke trust for the active config |
-| `tau clean [--lock]` | remove `.taugres/`; `--lock` also drops `.taugres.lock` |
+| `tau clean [--lock\|--cache]` | remove `.taugres/`; `--lock` also drops `.taugres.lock`; `--cache` drops only the sync cache (next sync re-derives, no reinstall) |
 | `tau prune` | remove trust records for projects that no longer exist |
 | `tau version` | print version |
 

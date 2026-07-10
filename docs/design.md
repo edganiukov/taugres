@@ -208,6 +208,7 @@ file — `.taugres/gen/manifest` — atomically written at the end of a sync:
 
 ```
 version:2                                      manifest schema
+tau:<build-stamp>                              tau build that wrote the manifest
 input:<sha256>:<mtime>:<size>:<ctime>:<path>   config/lock/source input and cheap stat identity
 tooldir:<abs-path>                             a tool bin dir that must exist
 managerdir:<mgr>:<abs-path>                    explicit ownership of a tool bin dir
@@ -218,6 +219,7 @@ toolpending:<mgr>                              latest manager install did not co
 
 | Dimension | Drift when… |
 | --- | --- |
+| tau | the manifest was written by a different tau build (see below) |
 | input | a config input's recorded stat identity changes in either direction, or its content hash differs during a thorough check |
 | tooldir | a recorded tool bin dir (mise store, pip/uv venv, npm prefix) is missing |
 | probe | an `exists()`/`which()`/`env()` result changed (a probed file appeared/vanished, a binary was installed/removed, an env var changed) |
@@ -227,6 +229,18 @@ These are the **env-trigger** dimensions (`state.NeedsSync`) that decide
 *whether* to sync. They short-circuit in hot-path order without spawning
 per-prompt goroutines. The `toolsig` lines drive *what work* a sync does — see
 Per-manager staleness.
+
+**Build-stamp invalidation.** Derived state — mise bin dirs resolved via
+`mise bin-paths`/`mise where`, rendered scripts — encodes tau's own logic, so a
+manifest written by a different tau build (`state.BuildStamp`: the VCS commit
+for clean builds, the executable's stat identity for dev builds) is not
+trusted. The sync it triggers is an ordinary non-forced one: installs no-op for
+tools already present, but every manager re-derives its bin dirs and the
+scripts are rebuilt. The hook picks this up like any other drift, so a fix to
+tau's derivation logic self-heals every project on the first prompt after the
+upgrade — no `--force`, no manual step. `tau clean --cache` is the manual
+equivalent: it drops only the manifest, forgetting all derived state while
+keeping installed prefixes.
 
 An `env()` probe records a **hash** of the observed value (not the value), so
 secrets never land in the on-disk manifest and a value containing `|` can't
@@ -427,7 +441,9 @@ Taugres GCs what it exclusively owns and can reason about; it delegates the rest
   config each sync.
 - **`tau clean`** removes the regenerable `.taugres/` (keeps `.taugres.lock`, so
   the rebuild reinstalls the same versions); `tau clean --lock` also drops the
-  lockfile for a from-scratch re-resolve.
+  lockfile for a from-scratch re-resolve; `tau clean --cache` drops only the
+  sync manifest, so the next sync re-derives all state without reinstalling
+  what is already present.
 - **`tau prune`** removes orphaned trust records.
 
 ## Normalized plan

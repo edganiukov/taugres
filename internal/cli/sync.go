@@ -224,6 +224,13 @@ func syncProject(e *Env, opts syncOptions) int {
 	// state already carries the resolved versions from the last sync.
 	sig := toolSigs(plan, lk)
 	prior, _ := state.Load(plan.StateDir)
+	// A manifest written by a different tau build may embed differently-derived
+	// state (bin dir resolution, script rendering), so don't trust it: treat
+	// this as a first sync. Installs are not forced — present tools no-op — but
+	// every manager re-derives its dirs and this build rewrites the scripts.
+	if prior != nil && prior.TauBuild != state.BuildStamp() {
+		prior = nil
+	}
 	fresh := freshness(prior, sig, plan, opts.update, opts.forced)
 
 	var miseBinDirs, toolDirs []string

@@ -11,9 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/edganiukov/taugres/internal/atomicfile"
 	"github.com/edganiukov/taugres/internal/model"
@@ -29,6 +31,7 @@ const GenDirName = "gen"
 // mtime checks compare against.
 //
 //	version:2                                      schema version
+//	tau:<build-stamp>                              tau build that wrote the manifest
 //	input:<sha256>:<mtime>:<size>:<ctime>:<path>   config input and stat identity
 //	tooldir:<abs-path>                             a tool bin dir that must exist
 //	managerdir:<mgr>:<abs-path>                    explicit tool-dir ownership
@@ -38,6 +41,37 @@ const GenDirName = "gen"
 const ManifestName = "manifest"
 
 const manifestVersion = 2
+
+// BuildStamp identifies the running tau build. Derived manifest state (mise
+// bin dirs, rendered scripts) encodes tau's own logic, so a manifest written
+// by a different build is stale: a fix to that logic takes effect on the very
+// next sync — the shell hook triggers it automatically — without --force.
+// Installs are not forced by this; already-present tools no-op. A clean VCS
+// build is identified by its commit; dirty or unstamped builds (local `go
+// build`, test binaries) fall back to the executable's stat identity, which
+// changes on every rebuild.
+var BuildStamp = sync.OnceValue(func() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		var revision, modified string
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				revision = s.Value
+			case "vcs.modified":
+				modified = s.Value
+			}
+		}
+		if revision != "" && modified == "false" {
+			return "vcs:" + revision
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		if fi, err := os.Stat(exe); err == nil {
+			return fmt.Sprintf("exe:%d:%d", fi.ModTime().UnixNano(), fi.Size())
+		}
+	}
+	return "unknown"
+})
 
 // InputMetadata is the cheap filesystem identity recorded for a config input.
 // Comparing it with the current file catches forward, backward, and same-size
@@ -52,6 +86,11 @@ type InputMetadata struct {
 type Manifest struct {
 	// Version is the parsed manifest schema. Version zero is the legacy format.
 	Version int
+	// TauBuild is the BuildStamp of the tau that wrote the manifest. A manifest
+	// from a different build is stale (its derived state may be wrong), so the
+	// next sync re-derives everything. Write fills it for new manifests; Load
+	// preserves it so TouchManifest never launders a foreign build's state.
+	TauBuild string
 
 	// Inputs maps each config-input file (the config, loaded modules, and
 	// fn/hook source files) to its content hash. Changed stat metadata is the
@@ -104,8 +143,13 @@ func (m *Manifest) Write(stateDir string) error {
 		m.InputMetadata = map[string]InputMetadata{}
 	}
 
+	if m.TauBuild == "" {
+		m.TauBuild = BuildStamp()
+	}
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "version:%d\n", manifestVersion)
+	fmt.Fprintf(&b, "tau:%s\n", m.TauBuild)
 	for _, p := range paths {
 		meta, ok := m.InputMetadata[p]
 		if !ok {
@@ -182,6 +226,8 @@ func Load(stateDir string) (*Manifest, error) {
 		switch tag {
 		case "version":
 			m.Version, _ = strconv.Atoi(rest)
+		case "tau":
+			m.TauBuild = rest
 		case "input":
 			hash, payload, ok := strings.Cut(rest, ":")
 			if !ok {
@@ -280,6 +326,10 @@ func statInput(path string) (InputMetadata, error) {
 // The hex result contains no '|' so it can ride in the hook session token.
 func SyncFingerprint(stateDir, configPath string, shells []string) string {
 	h := sha256.New()
+	// The computing build is part of the trigger state: replacing the tau
+	// binary invalidates outstanding hook session tokens, so the next prompt
+	// re-inspects and resyncs instead of trusting a stale token.
+	fmt.Fprintf(h, "tau:%s\x00", BuildStamp())
 	writeStat := func(path string) {
 		meta, err := statInput(path)
 		if err != nil {
@@ -456,6 +506,9 @@ func needsSyncLoaded(manifestInfo os.FileInfo, manifest *Manifest, configPath st
 	if manifest.Version < manifestVersion {
 		return true
 	}
+	if manifest.TauBuild != BuildStamp() {
+		return true // a different tau build derived this state
+	}
 	inputs := manifest.Inputs
 	if len(inputs) == 0 {
 		inputs = map[string]string{configPath: ""}
@@ -540,6 +593,10 @@ func CheckStale(stateDir string, expectedShells []string) StaleReason {
 	m, err := Load(stateDir)
 	if err != nil {
 		return StaleReason{Stale: true, Reason: "no generated manifest; run `tau sync`"}
+	}
+
+	if m.TauBuild != BuildStamp() {
+		return StaleReason{Stale: true, Reason: "tau was updated since the last sync; run `tau sync`"}
 	}
 
 	if len(m.PendingManagers) > 0 {

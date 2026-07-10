@@ -313,7 +313,7 @@ tau exec [--] <cmd>...     # run a command with the project env/PATH applied (no
 tau status                 # active project, sync state, tools, trust
 tau allow                  # trust the active project (once)
 tau deny                   # revoke trust
-tau clean [--lock]         # remove .taugres/; --lock also drops .taugres.lock
+tau clean [--lock|--cache] # remove .taugres/; --lock also drops .taugres.lock; --cache drops only the sync cache
 tau prune                  # remove orphaned trust records
 tau hook <shell>           # print the shell hook (bash|zsh|fish)
 tau hook-env <shell>       # used by the hook: env/activation commands for this prompt

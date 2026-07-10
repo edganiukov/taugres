@@ -969,6 +969,7 @@ func runClean(e *Env, args []string) int {
 	fs := flag.NewFlagSet("clean", flag.ContinueOnError)
 	fs.SetOutput(e.Stderr)
 	dropLock := fs.Bool("lock", false, "also delete .taugres.lock (next sync re-resolves unpinned tools)")
+	dropCache := fs.Bool("cache", false, "only drop the sync cache (the manifest); installed tools stay, the next sync re-derives all state")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -978,12 +979,22 @@ func runClean(e *Env, args []string) int {
 	}
 
 	// Remove the regenerable project-local state. Trust (global) and the
-	// mise store (shared) are intentionally left untouched.
+	// mise store (shared) are intentionally left untouched. --cache keeps the
+	// installed pip/npm/uv prefixes and only forgets the derived state, so the
+	// next sync recomputes everything without reinstalling what is present.
 	stateDir := filepath.Join(d.ProjectRoot, ".taugres")
-	if err := os.RemoveAll(stateDir); err != nil {
-		return fail(e, "removing %s: %v", stateDir, err)
+	if *dropCache {
+		manifest := state.ManifestPath(stateDir)
+		if err := os.Remove(manifest); err != nil && !os.IsNotExist(err) {
+			return fail(e, "removing %s: %v", manifest, err)
+		}
+		fmt.Fprintf(e.Stdout, "tau: removed %s\n", manifest)
+	} else {
+		if err := os.RemoveAll(stateDir); err != nil {
+			return fail(e, "removing %s: %v", stateDir, err)
+		}
+		fmt.Fprintf(e.Stdout, "tau: removed %s\n", stateDir)
 	}
-	fmt.Fprintf(e.Stdout, "tau: removed %s\n", stateDir)
 
 	if *dropLock {
 		lockPath := lock.Path(d.ProjectRoot)

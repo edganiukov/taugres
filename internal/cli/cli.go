@@ -121,7 +121,8 @@ Usage:
   tau status                 show active project, sync state, and tools
   tau allow                  trust the active project (once)
   tau deny                   revoke trust for the active project
-  tau clean [--lock]         remove generated state (.taugres/); --lock also drops .taugres.lock
+  tau clean [--lock|--cache]  remove generated state (.taugres/); --lock also drops .taugres.lock,
+                              --cache drops only the sync cache (next sync re-derives, no reinstall)
   tau prune                  remove trust records for projects that no longer exist
   tau hook <shell>           print the shell hook (bash|zsh|fish)
   tau hook-env <shell>       used by the hook: print env/activation commands for this prompt

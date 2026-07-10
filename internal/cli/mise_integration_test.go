@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/edganiukov/taugres/internal/lock"
+	"github.com/edganiukov/taugres/internal/state"
 	"github.com/edganiukov/taugres/internal/testutil"
 )
 
@@ -163,6 +164,85 @@ func TestTargetedUpdatePreservesLockOnFailure(t *testing.T) {
 	}
 	if entry := got.Mise["node"]; entry.Resolved != "20.0.0" {
 		t.Fatalf("failed update changed lock entry: %+v", entry)
+	}
+}
+
+// TestSyncRederivesAfterTauBuildChange proves the build-stamp invalidation: a
+// manifest written by a different tau build is not trusted, so the next sync
+// re-runs the (non-forced) install pipeline and re-derives the bin dirs with
+// the current build's logic — no --force, no config change.
+func TestSyncRederivesAfterTauBuildChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake mise shell stub is POSIX-only")
+	}
+	isolate(t)
+
+	store := testutil.TempWorkspace(t)
+	testutil.WriteExec(t, store, "node/1/bin/node", "#!/bin/sh\n")
+	logFile := filepath.Join(t.TempDir(), "install.log")
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  install) echo call >> \"" + logFile + "\" ;;\n" +
+		"  where) echo \"" + store + "/node/1\" ;;\n" +
+		"  bin-paths) echo \"" + store + "/node/1/bin\" ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "mise"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := testutil.TempWorkspace(t)
+	testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\nmise.tool(\"node@1\")\n")
+	if code, _, e := run(t, dir, "allow"); code != 0 {
+		t.Fatalf("allow: %s", e)
+	}
+	installs := func() int {
+		data, _ := os.ReadFile(logFile)
+		return strings.Count(string(data), "call")
+	}
+
+	if code, _, e := run(t, dir, "sync"); code != 0 {
+		t.Fatalf("sync 1: %s", e)
+	}
+	n1 := installs()
+	if code, _, e := run(t, dir, "sync"); code != 0 {
+		t.Fatalf("sync 2: %s", e)
+	}
+	if n2 := installs(); n2 != n1 {
+		t.Fatalf("unchanged sync re-ran mise install (%d -> %d)", n1, n2)
+	}
+
+	// Simulate a tau upgrade: rewrite the manifest's build stamp.
+	stateDir := filepath.Join(dir, ".taugres")
+	manifest, err := os.ReadFile(state.ManifestPath(stateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(manifest), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "tau:") {
+			lines[i] = "tau:previous-build"
+		}
+	}
+	if err := os.WriteFile(state.ManifestPath(stateDir), []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The hook's cheap check must notice, and --if-stale must resync (this is
+	// the auto-heal on the first prompt after an upgrade).
+	if need, _ := state.NeedsSync(stateDir, filepath.Join(dir, "workspace.tg")); !need {
+		t.Fatal("expected needs-sync when the manifest is from another tau build")
+	}
+	if code, _, e := run(t, dir, "sync", "--if-stale"); code != 0 {
+		t.Fatalf("sync 3: %s", e)
+	}
+	if n3 := installs(); n3 != n1+1 {
+		t.Errorf("build change should re-run the non-forced install pipeline once (%d -> %d)", n1, n3)
+	}
+	// The rewritten manifest carries the current stamp, so it is fresh again.
+	if need, _ := state.NeedsSync(stateDir, filepath.Join(dir, "workspace.tg")); need {
+		t.Error("resync should restamp the manifest with the current build")
 	}
 }
 

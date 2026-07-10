@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,6 +228,104 @@ func TestInspectHookDetectsMissingScript(t *testing.T) {
 	testutil.WriteFile(t, dir, ".taugres/gen/deactivate.bash", "x")
 	if inspection := InspectHook(stateDir, cfg, "bash"); !inspection.NeedsSync {
 		t.Error("missing activation script should trigger sync")
+	}
+}
+
+// tamperTauBuild rewrites the manifest's tau: line in place, simulating a
+// manifest written by a different tau build.
+func tamperTauBuild(t *testing.T, stateDir string) {
+	t.Helper()
+	data, err := os.ReadFile(ManifestPath(stateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "tau:") {
+			lines[i] = "tau:some-other-build"
+		}
+	}
+	if err := os.WriteFile(ManifestPath(stateDir), []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManifestStampsAndRoundTripsTauBuild(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	cfg := testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\n")
+	stateDir := filepath.Join(dir, ".taugres")
+
+	// Write stamps an empty TauBuild with the running build…
+	m := &Manifest{Inputs: map[string]string{cfg: ""}}
+	if err := m.Write(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TauBuild != BuildStamp() {
+		t.Errorf("TauBuild = %q, want current BuildStamp %q", got.TauBuild, BuildStamp())
+	}
+
+	// …and preserves a foreign build on rewrite (Load→Write, as TouchManifest
+	// does), so touching never launders another build's derived state.
+	got.TauBuild = "some-other-build"
+	if err := got.Write(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.TauBuild != "some-other-build" {
+		t.Errorf("TauBuild = %q, want preserved foreign stamp", again.TauBuild)
+	}
+}
+
+func TestNeedsSyncOnDifferentTauBuild(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	cfg := testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\n")
+	stateDir := filepath.Join(dir, ".taugres")
+
+	m := &Manifest{Inputs: map[string]string{cfg: ""}}
+	if err := m.Write(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if need, _ := NeedsSync(stateDir, cfg); need {
+		t.Fatal("should not need sync right after writing manifest")
+	}
+
+	tamperTauBuild(t, stateDir)
+	if need, _ := NeedsSync(stateDir, cfg); !need {
+		t.Error("expected needs-sync when the manifest was written by another tau build")
+	}
+}
+
+func TestCheckStaleOnDifferentTauBuild(t *testing.T) {
+	dir := testutil.TempWorkspace(t)
+	cfg := testutil.WriteFile(t, dir, "workspace.tg", "project(\"x\")\n")
+	stateDir := filepath.Join(dir, ".taugres")
+	hash, _ := HashFile(cfg)
+
+	m := &Manifest{Inputs: map[string]string{cfg: hash}}
+	if err := m.Write(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, dir, ".taugres/gen/activate.bash", "x")
+	testutil.WriteFile(t, dir, ".taugres/gen/deactivate.bash", "x")
+
+	if r := CheckStale(stateDir, []string{"bash"}); r.Stale {
+		t.Fatalf("should be fresh: %s", r.Reason)
+	}
+
+	tamperTauBuild(t, stateDir)
+	r := CheckStale(stateDir, []string{"bash"})
+	if !r.Stale {
+		t.Fatal("expected stale when the manifest was written by another tau build")
+	}
+	if !strings.Contains(r.Reason, "tau was updated") {
+		t.Errorf("reason should mention the tau update, got %q", r.Reason)
 	}
 }
 
