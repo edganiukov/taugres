@@ -108,7 +108,7 @@ func ToolBinDir(name, version string) (string, error) {
 // ToolBinDirContext is ToolBinDir with cancellation for sync/exec resolution.
 func ToolBinDirContext(ctx context.Context, name, version string) (string, error) {
 	if !Available() {
-		return "", fmt.Errorf("mise.where(%q) needs mise — install it with `curl https://mise.run | sh` (https://mise.jdx.dev)", name)
+		return "", fmt.Errorf("mise.where(%q) needs mise — install it with `curl https://mise.run | sh`", name)
 	}
 
 	ins, err := resolve(ctx, model.MiseTool{Name: name, Version: version})
@@ -189,7 +189,7 @@ func Install(ctx context.Context, tools []model.MiseTool, jobs int, force bool, 
 		return nil, nil
 	}
 	if !Available() {
-		return nil, fmt.Errorf("mise.tool needs mise — install it with `curl https://mise.run | sh` (https://mise.jdx.dev)")
+		return nil, fmt.Errorf("mise.tool needs mise — install it with `curl https://mise.run | sh`")
 	}
 
 	refs := make([]string, len(tools))

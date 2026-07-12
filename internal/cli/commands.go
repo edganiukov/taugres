@@ -8,11 +8,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/edganiukov/taugres/internal/atomicfile"
 	"github.com/edganiukov/taugres/internal/config"
@@ -405,8 +407,7 @@ func runExec(e *Env, args []string) int {
 	cmd.Stdout = e.Stdout
 	cmd.Stderr = e.Stderr
 	if err := cmd.Run(); err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			return ee.ExitCode()
 		}
 		return fail(e, "exec %s: %v", rest[0], err)
@@ -414,12 +415,10 @@ func runExec(e *Env, args []string) int {
 	return 0
 }
 
-// resolveDeferredEnvForSync resolves each plan.DeferredEnv at sync time. A
-// fully-static value (no dynamic exec) is joined and written to EnvSet, so it
-// activates instantly; a value with a dynamic exec has its static segments baked
-// to literals in place and is left for the renderer to emit as `$(cmd)`. Failures
-// are reported via onErr (best-effort), never fatal. Each entry runs against the
-// current env (including EnvSet updated by earlier static entries).
+// resolveDeferredEnvForSync resolves each plan.DeferredEnv at sync time. A fully-static value (no dynamic exec) is
+// joined and written to EnvSet, so it activates instantly; a value with a dynamic exec has its static segments baked to
+// literals in place and is left for the renderer to emit as `$(cmd)`. Failures are reported via onErr (best-effort),
+// never fatal. Each entry runs against the current env (including EnvSet updated by earlier static entries).
 func resolveDeferredEnvForSync(ctx context.Context, plan *model.Plan, lk *lock.File, onErr func(string)) {
 	for i := range plan.DeferredEnv {
 		de := &plan.DeferredEnv[i]
@@ -435,9 +434,8 @@ func resolveDeferredEnvForSync(ctx context.Context, plan *model.Plan, lk *lock.F
 				val, err := resolveSegment(ctx, *s, lk, plan, env)
 				if err != nil {
 					onErr("shell.env " + de.Name + ": " + err.Error())
-					// Never pass an unresolved static exec/where segment to the
-					// renderer: it would otherwise be mistaken for activation-time
-					// code or literal tool text.
+					// Never pass an unresolved static exec/where segment to the renderer: it would otherwise be
+					// mistaken for activation-time code or literal tool text.
 					*s = model.Segment{Kind: model.SegLiteral}
 					continue
 				}
@@ -455,8 +453,8 @@ func resolveDeferredEnvForSync(ctx context.Context, plan *model.Plan, lk *lock.F
 	}
 }
 
-// resolveDeferred resolves every segment (including dynamic exec) and joins them.
-// Used by `tau exec`, which has no shell to defer to.
+// resolveDeferred resolves every segment (including dynamic exec) and joins them.  Used by `tau exec`, which has no
+// shell to defer to.
 func resolveDeferred(ctx context.Context, segs []model.Segment, lk *lock.File, plan *model.Plan, env []string) (string, error) {
 	var b strings.Builder
 	for _, s := range segs {
@@ -469,9 +467,8 @@ func resolveDeferred(ctx context.Context, segs []model.Segment, lk *lock.File, p
 	return b.String(), nil
 }
 
-// resolveSegment resolves a single segment to its string value: a literal as-is,
-// a mise.where to the tool's bin dir (looked up via the locked version so it
-// matches PATH), or an exec to its command's trimmed stdout.
+// resolveSegment resolves a single segment to its string value: a literal as-is, a mise.where to the tool's bin dir
+// (looked up via the locked version so it matches PATH), or an exec to its command's trimmed stdout.
 func resolveSegment(ctx context.Context, s model.Segment, lk *lock.File, plan *model.Plan, env []string) (string, error) {
 	switch s.Kind {
 	case model.SegLiteral:
@@ -485,8 +482,8 @@ func resolveSegment(ctx context.Context, s model.Segment, lk *lock.File, plan *m
 	}
 }
 
-// miseVersion returns the concrete version to look up for a mise tool: the locked
-// resolved version if present, else the version declared in the config.
+// miseVersion returns the concrete version to look up for a mise tool: the locked resolved version if present, else the
+// version declared in the config.
 func miseVersion(tool string, lk *lock.File, plan *model.Plan) string {
 	if lk != nil {
 		if v := lk.Mise[tool].Resolved; v != "" {
@@ -501,8 +498,8 @@ func miseVersion(tool string, lk *lock.File, plan *model.Plan) string {
 	return ""
 }
 
-// resolveShell picks the interpreter for a shell.exec command: the explicit
-// shell if given, else the local login shell ($SHELL), else sh.
+// resolveShell picks the interpreter for a shell.exec command: the explicit shell if given, else the local login shell
+// ($SHELL), else sh.
 func resolveShell(shell string) string {
 	if shell != "" {
 		return shell
@@ -513,9 +510,9 @@ func resolveShell(shell string) string {
 	return "sh"
 }
 
-// captureCommand runs `<shell> -c command` in dir with env and returns its stdout
-// with trailing newlines trimmed (like shell command substitution). shell is the
-// interpreter name ("" resolves to the local $SHELL, else sh). Backs shell.exec.
+// captureCommand runs `<shell> -c command` in dir with env and returns its stdout with trailing newlines trimmed (like
+// shell command substitution). shell is the interpreter name ("" resolves to the local $SHELL, else sh). Backs
+// shell.exec.
 func captureCommand(ctx context.Context, shell, command, dir string, env []string) (string, error) {
 	cmd := exec.CommandContext(ctx, resolveShell(shell), "-c", command)
 	cmd.Dir = dir
@@ -532,9 +529,8 @@ func captureCommand(ctx context.Context, shell, command, dir string, env []strin
 	return strings.TrimRight(out.String(), "\r\n"), nil
 }
 
-// lookPathIn resolves cmd against the PATH carried in env (not the parent
-// process's PATH), so `tau exec` finds tools from the project environment. A cmd
-// containing a path separator is returned as-is.
+// lookPathIn resolves cmd against the PATH carried in env (not the parent process's PATH), so `tau exec` finds tools
+// from the project environment. A cmd containing a path separator is returned as-is.
 func lookPathIn(cmd string, env []string) (string, error) {
 	if strings.ContainsRune(cmd, os.PathSeparator) {
 		return cmd, nil
@@ -628,8 +624,7 @@ func runHook(e *Env, args []string) int {
 	if len(args) != 1 {
 		return fail(e, "usage: tau hook <shell> (bash|zsh|fish)")
 	}
-	// Bake in the absolute path to this tau binary so the hook invokes exactly
-	// this executable via `tau hook-env`.
+	// Bake in the absolute path to this tau binary so the hook invokes exactly this executable via `tau hook-env`.
 	tauBin := "tau"
 	if p, err := os.Executable(); err == nil {
 		tauBin = p
@@ -644,9 +639,9 @@ func runHook(e *Env, args []string) int {
 
 // --- setup ---
 
-// runSetup installs the tau shell hook into the user's shell startup file
-// (~/.bashrc, ~/.zshrc, or ~/.config/fish/config.fish). The shell defaults to
-// the current one ($SHELL) and can be overridden, e.g. `tau setup bash`.
+// runSetup installs the tau shell hook into the user's shell startup file (~/.bashrc, ~/.zshrc, or
+// ~/.config/fish/config.fish). The shell defaults to the current one ($SHELL) and can be overridden, e.g. `tau setup
+// bash`.
 func runSetup(e *Env, args []string) int {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(e.Stderr)
@@ -655,8 +650,8 @@ func runSetup(e *Env, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	rest := fs.Args()
 
+	rest := fs.Args()
 	var shell string
 	switch len(rest) {
 	case 0:
@@ -670,6 +665,7 @@ func runSetup(e *Env, args []string) int {
 	default:
 		return fail(e, "usage: tau setup [shell] (bash|zsh|fish)")
 	}
+
 	if !shellreg.IsSupported(shell) {
 		return fail(e, "unsupported shell %q (supported: %s)", shell, strings.Join(shellreg.Supported, ", "))
 	}
@@ -697,6 +693,7 @@ func runSetup(e *Env, args []string) int {
 		if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
 			b.WriteByte('\n')
 		}
+
 		b.WriteByte('\n')
 		b.WriteString("# taugres shell integration (added by `tau setup`)")
 		b.WriteString(hookInstallLine(shell))
@@ -706,61 +703,99 @@ func runSetup(e *Env, args []string) int {
 		if err != nil {
 			return fail(e, "updating %s: %v", rc, err)
 		}
+
 		if _, err := f.WriteString(b.String()); err != nil {
 			f.Close()
 			return fail(e, "updating %s: %v", rc, err)
 		}
+
 		if err := f.Close(); err != nil {
 			return fail(e, "updating %s: %v", rc, err)
 		}
+
 		fmt.Fprintf(e.Stdout, "tau: installed the %s hook in %s\n", shell, rc)
 		fmt.Fprintf(e.Stdout, "tau: restart your shell or run: source %s\n", rc)
 	}
 
-	// The hook activates environments; mise provisions the tools those
-	// environments put on PATH. Offer to install it when it is missing so a fresh
-	// machine is ready in one command. This never fails setup — the hook is
-	// already in place — so any problem is reported and shrugged off.
+	// The hook activates environments; mise provisions the tools those environments put on PATH. Offer to install it
+	// when it is missing so a fresh machine is ready in one command. This never fails setup — the hook is already in
+	// place — so any problem is reported and shrugged off.
 	if !mise.Available() {
 		maybeInstallMise(e, *assumeYes)
 	}
 	return 0
 }
 
-// miseInstallCommand is mise's official one-liner installer. It is displayed
-// verbatim before running and is the exact command tau runs, so the user sees
-// precisely what will execute.
-const miseInstallCommand = "curl https://mise.run | sh"
+// miseInstallURL is mise's official installer endpoint. tau fetches it directly (rather than shelling out to curl) so
+// the installer works without curl/wget, network failures surface as typed errors, and the whole script is downloaded
+// before it runs — a dropped connection can't execute a truncated installer.
+const miseInstallURL = "https://mise.run"
 
-// installMise runs the mise installer, streaming its output to out. It is a
-// variable so tests can stub it instead of hitting the network.
+// miseInstallCommand is the equivalent one-liner shown as a manual fallback when tau declines to, or cannot, install
+// mise itself.
+const miseInstallCommand = "curl " + miseInstallURL + " | sh"
+
+// miseFetchTimeout bounds only the installer download, not the install itself (which downloads the mise binary and can
+// legitimately take a while).
+const miseFetchTimeout = 30 * time.Second
+
+// installMise downloads mise's installer from miseInstallURL and runs it with sh, streaming output to out. The script
+// is read fully into memory first, then fed to sh via stdin — the same semantics as `curl | sh` minus the pipe, so
+// a partial download never executes. It is a variable so tests can stub it instead of hitting the network.
 var installMise = func(ctx context.Context, out io.Writer) error {
-	if _, err := exec.LookPath("curl"); err != nil {
-		return fmt.Errorf("curl is required to install mise but is not on PATH")
+	fetchCtx, cancel := context.WithTimeout(ctx, miseFetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, miseInstallURL, nil)
+	if err != nil {
+		return err
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-c", miseInstallCommand)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("downloading mise installer: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("downloading mise installer: %s", resp.Status)
+	}
+	// Cap the read so a misbehaving endpoint can't stream unbounded data into
+	// memory; the real installer is a few KB.
+	script, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return fmt.Errorf("downloading mise installer: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, "sh")
+	cmd.Stdin = bytes.NewReader(script)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	return cmd.Run()
 }
 
-// maybeInstallMise offers to install mise when it is missing from PATH. mise
-// provisions the tools tau declares, so a machine without it can activate
-// environments but not install anything. With assumeYes it installs without
-// prompting (CI/scripts); otherwise it shows the exact command and installs
-// only on an explicit yes. It is best-effort: every failure is reported with
-// the manual command and returns without aborting setup.
+// maybeInstallMise offers to install mise when it is missing from PATH. mise provisions the tools tau declares, so
+// a machine without it can activate environments but not install anything. With assumeYes it installs without prompting
+// (CI/scripts); otherwise it names the installer source and installs only on an explicit yes. It is best-effort: every
+// failure is reported with the manual command and returns without aborting setup.
 func maybeInstallMise(e *Env, assumeYes bool) {
+	ctx := e.ctx()
 	fmt.Fprintln(e.Stdout, "tau: mise is not on PATH — it's needed to install tools.")
 	if !assumeYes {
-		fmt.Fprintf(e.Stdout, "      install it now? this runs:\n        %s\n      [y/N]: ", miseInstallCommand)
-		if !confirmYes(e.Stdin) {
-			fmt.Fprintf(e.Stdout, "tau: skipped; install mise later with:\n        %s\n", miseInstallCommand)
+		fmt.Fprintf(e.Stdout, "\tinstall it now? tau will download and run the installer from: %s [y/N]: ", miseInstallURL)
+		if !confirmYes(ctx, e.Stdin) {
+			if ctx.Err() != nil { // Ctrl+C at the prompt
+				fmt.Fprintln(e.Stdout)
+				fmt.Fprintln(e.Stderr, "tau: setup cancelled")
+				return
+			}
+			fmt.Fprintf(e.Stdout, "tau: skipped; install mise later with:\n\t%s\n", miseInstallCommand)
 			return
 		}
 	}
-	if err := installMise(e.ctx(), e.Stderr); err != nil {
-		fmt.Fprintf(e.Stderr, "tau: installing mise failed: %v\n      install it manually: %s\n", err, miseInstallCommand)
+	if err := installMise(ctx, e.Stderr); err != nil {
+		if ctx.Err() != nil { // Ctrl+C during download/install
+			fmt.Fprintln(e.Stderr, "tau: setup cancelled")
+			return
+		}
+		fmt.Fprintf(e.Stderr, "tau: installing mise failed: %v\n\tinstall it manually: %s\n", err, miseInstallCommand)
 		return
 	}
 	// mise.run installs to ~/.local/bin, which may not be on PATH in this or the
@@ -769,23 +804,34 @@ func maybeInstallMise(e *Env, assumeYes bool) {
 		fmt.Fprintln(e.Stdout, "tau: mise installed.")
 	} else {
 		fmt.Fprintln(e.Stdout, "tau: mise installed, but it is not on your PATH yet —")
-		fmt.Fprintln(e.Stdout, "      restart your shell, or add mise's bin dir (usually ~/.local/bin) to PATH.")
+		fmt.Fprintln(e.Stdout, "\tyour shell, or add mise's bin dir (usually ~/.local/bin) to PATH.")
 	}
 }
 
-// confirmYes reads a single line and reports whether it is an affirmative
-// response. A nil reader, EOF, or anything but y/yes is treated as no, so a
-// non-interactive `tau setup` (no stdin) declines rather than hangs.
-func confirmYes(r io.Reader) bool {
+// confirmYes reads a single line and reports whether it is an affirmative response. A nil reader, EOF, or anything but
+// y/yes is treated as no, so a non-interactive `tau setup` (no stdin) declines rather than hangs. The read runs in
+// a goroutine so a cancelled context (Ctrl+C) unblocks it — otherwise the blocking stdin read would ignore the signal,
+// since Main traps SIGINT into context cancellation rather than terminating. The goroutine, still blocked on stdin, is
+// harmlessly abandoned; the process exits shortly after.
+func confirmYes(ctx context.Context, r io.Reader) bool {
 	if r == nil {
 		return false
 	}
-	line, _ := bufio.NewReader(r).ReadString('\n')
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes":
-		return true
-	default:
+	ch := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(r).ReadString('\n')
+		ch <- line
+	}()
+	select {
+	case <-ctx.Done():
 		return false
+	case line := <-ch:
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "y", "yes":
+			return true
+		default:
+			return false
+		}
 	}
 }
 
@@ -794,11 +840,12 @@ func hookInstallLine(shell string) string {
 	if shell == shellreg.Fish {
 		return "tau hook fish | source"
 	}
+
 	return fmt.Sprintf("eval \"$(tau hook %s)\"", shell)
 }
 
-// shellRCPath returns the startup file `tau setup` appends the hook to, honoring
-// ZDOTDIR (zsh) and XDG_CONFIG_HOME (fish).
+// shellRCPath returns the startup file `tau setup` appends the hook to, honoring ZDOTDIR (zsh) and XDG_CONFIG_HOME
+// (fish).
 func shellRCPath(shell string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -828,17 +875,14 @@ func shellRCPath(shell string) (string, error) {
 func runActivate(e *Env, args []string) int   { return emitGenScript(e, args, "activate") }
 func runDeactivate(e *Env, args []string) int { return emitGenScript(e, args, "deactivate") }
 
-// emitGenScript prints the generated activate/deactivate script for the current
-// project to stdout, so a user can `eval` it. It does no staleness check: `tau
-// status` reports staleness.
+// emitGenScript prints the generated activate/deactivate script for the current project to stdout, so a user can `eval`
+// it. It does no staleness check: `tau status` reports staleness.
 //
-// Both kinds are trust-gated: the caller sources this stdout, so tau must only
-// emit a script it generated itself during a trusted sync — never repo bytes.
-// A cloned untrusted repo can commit its own .taugres/gen/deactivate.<shell>,
-// and even a teardown script runs arbitrary shell, so refusing an untrusted
-// project is the security boundary (trust lives outside the repo, so a clone
-// can't forge it). The hook's own auto-teardown does not go through here; it
-// reads the deactivate script directly for a project it activated while trusted.
+// Both kinds are trust-gated: the caller sources this stdout, so tau must only emit a script it generated itself during
+// a trusted sync — never repo bytes.  A cloned untrusted repo can commit its own .taugres/gen/deactivate.<shell>, and
+// even a teardown script runs arbitrary shell, so refusing an untrusted project is the security boundary (trust lives
+// outside the repo, so a clone can't forge it). The hook's own auto-teardown does not go through here; it reads the
+// deactivate script directly for a project it activated while trusted.
 func emitGenScript(e *Env, args []string, kind string) int {
 	var shell string
 	switch len(args) {
@@ -883,23 +927,19 @@ func emitGenScript(e *Env, args []string, kind string) int {
 
 // --- hook-env ---
 
-// hookToken is the per-shell session state runHookEnv round-trips through the
-// TAUGRES_HOOK env var, so the shell holds no state machine and tau writes no
-// state files. Its string form is "<applied>|<stamp>|<fp>|<proj>":
+// hookToken is the per-shell session state runHookEnv round-trips through the TAUGRES_HOOK env var, so the shell holds
+// no state machine and tau writes no state files. Its string form is "<applied>|<stamp>|<fp>|<proj>":
 //
 //	applied  1 when this shell has proj's activate script sourced, else 0
 //	stamp    proj's activate-script mtime in ns ("" when there is no script)
 //	fp       retry fingerprint ("" once synced; non-empty after a failed sync)
 //	proj     project root (may contain '|', so it is the trailing field)
 //
-// It is exported so `tau hook-env` (a subprocess) can read it — which means a
-// child shell inherits it, while the aliases and functions the activate script
-// defined do not survive the fork. The shim therefore keeps an UNEXPORTED
-// _TAU_APPLIED flag alongside (set by the same eval'd output) and passes it
-// back as an argument: an inherited token whose shell lacks the flag has its
-// applied claim reconciled to false, so the child re-activates. An empty or
-// foreign token value parses as "nothing recorded" and is treated as a clean
-// reset.
+// It is exported so `tau hook-env` (a subprocess) can read it — which means a child shell inherits it, while the
+// aliases and functions the activate script defined do not survive the fork. The shim therefore keeps an UNEXPORTED
+// _TAU_APPLIED flag alongside (set by the same eval'd output) and passes it back as an argument: an inherited token
+// whose shell lacks the flag has its applied claim reconciled to false, so the child re-activates. An empty or foreign
+// token value parses as "nothing recorded" and is treated as a clean reset.
 type hookToken struct {
 	applied bool
 	stamp   string
@@ -933,12 +973,10 @@ func (t hookToken) String() string {
 	return applied + "|" + t.stamp + "|" + t.fp + "|" + t.proj
 }
 
-// runHookEnv is the hook backend: the shell shim evals this command's stdout on
-// every in-project prompt, and ALL hook logic — staleness, the retry guard,
-// auto-sync, trust, activation/deactivation — lives here in Go. It computes the
-// desired state first and emits at most one transition (tear down the applied
-// project, then activate the target), so the sourced env can never be left torn
-// down or doubly applied.
+// runHookEnv is the hook backend: the shell shim evals this command's stdout on every in-project prompt, and ALL hook
+// logic — staleness, the retry guard, auto-sync, trust, activation/deactivation — lives here in Go. It computes the
+// desired state first and emits at most one transition (tear down the applied project, then activate the target), so
+// the sourced env can never be left torn down or doubly applied.
 func runHookEnv(e *Env, args []string) int {
 	if len(args) < 1 || len(args) > 3 {
 		return fail(e, "usage: tau hook-env <shell> [applied] [config-dir]")
@@ -949,9 +987,8 @@ func runHookEnv(e *Env, args []string) int {
 	}
 
 	prev, _ := parseHookToken(os.Getenv("TAUGRES_HOOK"))
-	// Reconcile the token's applied claim against shell reality: the shim passes
-	// its unexported _TAU_APPLIED, which a child shell does not inherit (nor the
-	// aliases/functions), so an inherited "applied" token re-activates there.
+	// Reconcile the token's applied claim against shell reality: the shim passes its unexported _TAU_APPLIED, which
+	// a child shell does not inherit (nor the aliases/functions), so an inherited "applied" token re-activates there.
 	// When the arg is absent (a shim from an older tau), trust the claim.
 	if len(args) >= 2 {
 		prev.applied = prev.applied && args[1] == "1"
@@ -990,10 +1027,11 @@ func runHookEnv(e *Env, args []string) int {
 		teardown = deactivateScript(prev.proj)
 	}
 
-	hint := ""
+	var hint string
 	if len(args) == 3 {
 		hint = args[2]
 	}
+
 	d, err := discoverForHook(e.Wd, hint)
 	if err != nil {
 		// Outside any project: tear down whatever this shell applied and forget.
@@ -1010,22 +1048,21 @@ func runHookEnv(e *Env, args []string) int {
 		}
 		return 0
 	}
+
 	proj := d.ProjectRoot
 	stateDir := filepath.Join(proj, ".taugres")
 
-	// Trust decides everything downstream and is cheap to check in-process, so
-	// check it live on every prompt: an untrusted project gets no sync attempt
-	// and no activation, and `tau allow` takes effect on the very next prompt
-	// with no state to invalidate. A trust-store read error is fail-closed but
-	// surfaced below rather than silently swallowed.
+	// Trust decides everything downstream and is cheap to check in-process, so check it live on every prompt: an
+	// untrusted project gets no sync attempt and no activation, and `tau allow` takes effect on the very next prompt
+	// with no state to invalidate. A trust-store read error is fail-closed but surfaced below rather than silently
+	// swallowed.
 	allowed, terr := trust.IsAllowed(d.ConfigPath)
 	trusted := allowed && terr == nil
 
-	// Auto-sync when stale and trusted, guarded by the retry fingerprint: after a
-	// failed sync fp is non-empty and the attempt is not repeated until the
-	// trigger state changes. InspectHook parses state once and reuses the activate
+	// Auto-sync when stale and trusted, guarded by the retry fingerprint: after a failed sync fp is non-empty and the
+	// attempt is not repeated until the trigger state changes. InspectHook parses state once and reuses the activate
 	// script stat as the token stamp.
-	fp := ""
+	var fp string
 	inspection := state.HookInspection{ActivationPath: filepath.Join(state.GenDir(stateDir), "activate."+shell)}
 	if trusted {
 		inspection = state.InspectHook(stateDir, d.ConfigPath, shell)
@@ -1073,11 +1110,10 @@ func runHookEnv(e *Env, args []string) int {
 			}
 		}
 	}
-	setToken(cur)
 
-	// Explain why an in-project prompt did not activate — once per state, since
-	// we only reach here when the token changed. A missing script while trusted
-	// (stamp == "") is governed by the fp retry guard and `tau status`, so stay
+	setToken(cur)
+	// Explain why an in-project prompt did not activate — once per state, since we only reach here when the token
+	// changed. A missing script while trusted (stamp == "") is governed by the fp retry guard and `tau status`, so stay
 	// quiet.
 	if !cur.applied {
 		if terr != nil {
@@ -1086,12 +1122,12 @@ func runHookEnv(e *Env, args []string) int {
 			fmt.Fprintf(e.Stderr, "tau: project is not trusted; run `tau allow`\n")
 		}
 	}
+
 	return 0
 }
 
-// discoverForHook uses the config directory already found by the pure-shell
-// gate, avoiding a second upward walk from a deeply nested working directory.
-// Invalid or out-of-tree hints fall back to normal discovery.
+// discoverForHook uses the config directory already found by the pure-shell gate, avoiding a second upward walk from
+// a deeply nested working directory.  Invalid or out-of-tree hints fall back to normal discovery.
 func discoverForHook(wd, hint string) (*discover.Discovery, error) {
 	if hint == "" {
 		return discover.Discover(wd)

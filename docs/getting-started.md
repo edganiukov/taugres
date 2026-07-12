@@ -17,8 +17,9 @@ tau setup bash       # a specific shell
 ```
 
 If `mise` (used to provision tools) is not on `PATH`, `tau setup` also offers to
-install it, showing the exact command (`curl https://mise.run | sh`) and running
-it only if you confirm; `tau setup --yes` installs it without prompting.
+install it: it downloads mise's installer from `https://mise.run` and runs it,
+only after you confirm (no `curl` needed). `tau setup --yes` installs it without
+prompting; the by-hand equivalent is `curl https://mise.run | sh`.
 
 Or install it by hand, once per shell:
 

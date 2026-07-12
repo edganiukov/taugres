@@ -203,6 +203,37 @@ func TestSetupSkipsMisePromptWhenPresent(t *testing.T) {
 	}
 }
 
+func TestSetupCancelledAtPrompt(t *testing.T) {
+	called := stubMiseMissing(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/bin/bash")
+
+	// A cancelled context stands in for Ctrl+C; stdin blocks forever, so only
+	// context cancellation can unblock the prompt.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+
+	var out, errb bytes.Buffer
+	e := &Env{Args: []string{"setup"}, Stdin: pr, Stdout: &out, Stderr: &errb, Wd: home, Ctx: ctx}
+	if code := Main(e); code != 0 {
+		t.Fatalf("setup exit %d, err=%s", code, errb.String())
+	}
+	if *called {
+		t.Error("installer ran despite cancellation")
+	}
+	if !strings.Contains(errb.String(), "cancelled") {
+		t.Errorf("expected cancellation notice, got out=%q err=%q", out.String(), errb.String())
+	}
+	// The hook itself should still have been installed before the prompt.
+	rc, _ := os.ReadFile(filepath.Join(home, ".bashrc"))
+	if !strings.Contains(string(rc), "tau hook bash") {
+		t.Errorf("hook was not installed:\n%s", rc)
+	}
+}
+
 func TestSetupDoesNotDuplicateHandInstalledHook(t *testing.T) {
 	// mise present so the run doesn't detour into the mise prompt.
 	origBinary := mise.Binary

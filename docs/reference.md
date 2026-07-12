@@ -335,12 +335,13 @@ tau setup bash       # a specific shell
 tau setup --yes      # also install mise (if missing) without prompting
 ```
 
-If `mise` is not on `PATH`, `tau setup` offers to install it with mise's
-official installer (`curl https://mise.run | sh`), showing the exact command
-first and running it only if you confirm (or pass `--yes`). mise provisions the
-tools tau declares, so without it environments still activate but no tools are
-installed. After installing, ensure mise's bin dir (usually `~/.local/bin`) is
-on `PATH`.
+If `mise` is not on `PATH`, `tau setup` offers to install it: it downloads
+mise's official installer from `https://mise.run` and runs it, only after you
+confirm (or pass `--yes`). The download happens in tau (no `curl` needed) and
+the whole script is fetched before it runs. The equivalent by hand is
+`curl https://mise.run | sh`. mise provisions the tools tau declares, so without
+it environments still activate but no tools are installed. After installing,
+ensure mise's bin dir (usually `~/.local/bin`) is on `PATH`.
 
 Or install it by hand, once per shell:
 
