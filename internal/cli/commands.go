@@ -695,7 +695,7 @@ func runSetup(e *Env, args []string) int {
 		}
 
 		b.WriteByte('\n')
-		b.WriteString("# taugres shell integration (added by `tau setup`)")
+		b.WriteString("# taugres shell integration (added by `tau setup`)\n")
 		b.WriteString(hookInstallLine(shell))
 		b.WriteString("\n")
 

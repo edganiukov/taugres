@@ -49,6 +49,11 @@ func TestSetupDefaultsToCurrentShell(t *testing.T) {
 	if !strings.Contains(string(rc), `eval "$(tau hook zsh)"`) {
 		t.Errorf(".zshrc missing hook line:\n%s", rc)
 	}
+	// The hook must be on its own line, not appended to the marker comment (which
+	// would comment it out and silently disable it).
+	if !strings.Contains(string(rc), "`tau setup`)\neval \"$(tau hook zsh)\"") {
+		t.Errorf("hook must be on its own uncommented line:\n%s", rc)
+	}
 }
 
 func TestSetupIsIdempotent(t *testing.T) {
