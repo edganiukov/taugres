@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -28,6 +27,7 @@ import (
 	"github.com/edganiukov/taugres/internal/toolmgr"
 	"github.com/edganiukov/taugres/internal/tools/mise"
 	"github.com/edganiukov/taugres/internal/trust"
+	"github.com/edganiukov/taugres/internal/ui"
 	"github.com/edganiukov/taugres/internal/validate"
 )
 
@@ -779,8 +779,8 @@ func maybeInstallMise(e *Env, assumeYes bool) {
 	ctx := e.ctx()
 	fmt.Fprintln(e.Stdout, "tau: mise is not on PATH — it's needed to install tools.")
 	if !assumeYes {
-		fmt.Fprintf(e.Stdout, "\tinstall it now? tau will download and run the installer from: %s [y/N]: ", miseInstallURL)
-		if !confirmYes(ctx, e.Stdin) {
+		prompt := "\tinstall it now? tau will download and run the installer from: " + miseInstallURL
+		if !ui.Confirm(ctx, e.Stdout, e.Stdin, prompt) {
 			if ctx.Err() != nil { // Ctrl+C at the prompt
 				fmt.Fprintln(e.Stdout)
 				fmt.Fprintln(e.Stderr, "tau: setup cancelled")
@@ -805,33 +805,6 @@ func maybeInstallMise(e *Env, assumeYes bool) {
 	} else {
 		fmt.Fprintln(e.Stdout, "tau: mise installed, but it is not on your PATH yet —")
 		fmt.Fprintln(e.Stdout, "\tyour shell, or add mise's bin dir (usually ~/.local/bin) to PATH.")
-	}
-}
-
-// confirmYes reads a single line and reports whether it is an affirmative response. A nil reader, EOF, or anything but
-// y/yes is treated as no, so a non-interactive `tau setup` (no stdin) declines rather than hangs. The read runs in
-// a goroutine so a cancelled context (Ctrl+C) unblocks it — otherwise the blocking stdin read would ignore the signal,
-// since Main traps SIGINT into context cancellation rather than terminating. The goroutine, still blocked on stdin, is
-// harmlessly abandoned; the process exits shortly after.
-func confirmYes(ctx context.Context, r io.Reader) bool {
-	if r == nil {
-		return false
-	}
-	ch := make(chan string, 1)
-	go func() {
-		line, _ := bufio.NewReader(r).ReadString('\n')
-		ch <- line
-	}()
-	select {
-	case <-ctx.Done():
-		return false
-	case line := <-ch:
-		switch strings.ToLower(strings.TrimSpace(line)) {
-		case "y", "yes":
-			return true
-		default:
-			return false
-		}
 	}
 }
 
