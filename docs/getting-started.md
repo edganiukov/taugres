@@ -7,7 +7,16 @@ and [design.md](design.md) for the full design.
 
 ## The shell hook
 
-Install once per shell:
+The quickest way is `tau setup`, which appends the hook to your shell's startup
+file (idempotently). It defaults to the current shell (`$SHELL`); pass one to
+override:
+
+```sh
+tau setup            # current shell
+tau setup bash       # a specific shell
+```
+
+Or install it by hand, once per shell:
 
 ```sh
 eval "$(tau hook zsh)"      # ~/.zshrc     (double quotes required)

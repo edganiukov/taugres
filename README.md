@@ -22,7 +22,8 @@ mise.)
 Install the shell hook once:
 
 ```sh
-eval "$(tau hook zsh)"      # ~/.zshrc  (or: bash, or `tau hook fish | source`)
+tau setup                   # adds the hook to your shell's startup file
+# ...or by hand: eval "$(tau hook zsh)"  >> ~/.zshrc  (or bash, or `tau hook fish | source`)
 ```
 
 Then, in a project:

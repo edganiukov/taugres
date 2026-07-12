@@ -27,6 +27,85 @@ func isolate(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 }
 
+func TestSetupDefaultsToCurrentShell(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/usr/bin/zsh")
+
+	code, out, errOut := run(t, home, "setup")
+	if code != 0 {
+		t.Fatalf("setup failed: %s", errOut)
+	}
+	if !strings.Contains(out, ".zshrc") {
+		t.Errorf("expected .zshrc in output, got %q", out)
+	}
+	rc, err := os.ReadFile(filepath.Join(home, ".zshrc"))
+	if err != nil {
+		t.Fatalf("reading .zshrc: %v", err)
+	}
+	if !strings.Contains(string(rc), `eval "$(tau hook zsh)"`) {
+		t.Errorf(".zshrc missing hook line:\n%s", rc)
+	}
+}
+
+func TestSetupIsIdempotent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/bin/bash")
+
+	run(t, home, "setup")
+	run(t, home, "setup") // second run should not duplicate
+
+	rc, _ := os.ReadFile(filepath.Join(home, ".bashrc"))
+	if n := strings.Count(string(rc), "tau hook bash"); n != 1 {
+		t.Errorf("hook line appears %d times, want 1:\n%s", n, rc)
+	}
+}
+
+func TestSetupExplicitFish(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// XDG_CONFIG_HOME unset so it defaults to ~/.config.
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	if code, _, errOut := run(t, home, "setup", "fish"); code != 0 {
+		t.Fatalf("setup fish failed: %s", errOut)
+	}
+	rc, err := os.ReadFile(filepath.Join(home, ".config", "fish", "config.fish"))
+	if err != nil {
+		t.Fatalf("reading config.fish: %v", err)
+	}
+	if !strings.Contains(string(rc), "tau hook fish | source") {
+		t.Errorf("config.fish missing hook line:\n%s", rc)
+	}
+}
+
+func TestSetupRejectsUnknownShell(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	code, _, errOut := run(t, t.TempDir(), "setup", "powershell")
+	if code == 0 || !strings.Contains(errOut, "unsupported shell") {
+		t.Errorf("expected unsupported-shell error, code=%d err=%s", code, errOut)
+	}
+}
+
+func TestSetupPreservesExistingContent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/bin/bash")
+	existing := "export EXISTING=1\n"
+	if err := os.WriteFile(filepath.Join(home, ".bashrc"), []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, home, "setup")
+	rc, _ := os.ReadFile(filepath.Join(home, ".bashrc"))
+	if !strings.Contains(string(rc), "export EXISTING=1") {
+		t.Errorf("setup clobbered existing content:\n%s", rc)
+	}
+	if !strings.Contains(string(rc), `eval "$(tau hook bash)"`) {
+		t.Errorf("setup did not append hook:\n%s", rc)
+	}
+}
+
 func TestInitCreatesWorkspace(t *testing.T) {
 	isolate(t)
 	dir := testutil.TempWorkspace(t)

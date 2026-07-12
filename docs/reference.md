@@ -315,6 +315,7 @@ tau allow                  # trust the active project (once)
 tau deny                   # revoke trust
 tau clean [--lock|--cache] # remove .taugres/; --lock also drops .taugres.lock; --cache drops only the sync cache
 tau prune                  # remove orphaned trust records
+tau setup [shell]          # install the shell hook into your startup file (default: current shell)
 tau hook <shell>           # print the shell hook (bash|zsh|fish)
 tau hook-env <shell>       # used by the hook: env/activation commands for this prompt
 tau activate [shell]       # print the activation script for a trusted project (default: $SHELL)
@@ -324,7 +325,15 @@ tau version
 
 ### Installing the shell hook
 
-Install once per shell:
+The easy way — `tau setup` appends the hook to your shell's startup file
+(idempotently). It defaults to the current shell (`$SHELL`); pass one to override:
+
+```sh
+tau setup            # current shell -> ~/.bashrc / ~/.zshrc / config.fish
+tau setup bash       # a specific shell
+```
+
+Or install it by hand, once per shell:
 
 ```sh
 eval "$(tau hook zsh)"     # ~/.zshrc

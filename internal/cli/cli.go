@@ -80,6 +80,8 @@ func dispatch(e *Env, cmd string, rest []string) int {
 		return runExec(e, rest)
 	case "status":
 		return runStatus(e, rest)
+	case "setup":
+		return runSetup(e, rest)
 	case "hook":
 		return runHook(e, rest)
 	case "hook-env":
@@ -124,6 +126,7 @@ Usage:
   tau clean [--lock|--cache]  remove generated state (.taugres/); --lock also drops .taugres.lock,
                               --cache drops only the sync cache (next sync re-derives, no reinstall)
   tau prune                  remove trust records for projects that no longer exist
+  tau setup [shell]          install the shell hook into your startup file (default: current shell)
   tau hook <shell>           print the shell hook (bash|zsh|fish)
   tau hook-env <shell>       used by the hook: print env/activation commands for this prompt
   tau activate [shell]       print the activation script for a trusted project (default: current shell)
@@ -136,6 +139,8 @@ Flags:
   tau sync --verbose         print every step and tool output
 
 Install the hook:
+  tau setup                   # add it to your shell's startup file automatically
+  # ...or by hand:
   eval "$(tau hook zsh)"      # ~/.zshrc
   eval "$(tau hook bash)"     # ~/.bashrc
   tau hook fish | source      # ~/.config/fish/config.fish

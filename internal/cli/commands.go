@@ -640,6 +640,117 @@ func runHook(e *Env, args []string) int {
 	return 0
 }
 
+// --- setup ---
+
+// setupMarker tags the block `tau setup` adds to a shell's startup file, so a
+// re-run detects it and stays idempotent.
+const setupMarker = "# taugres shell integration (added by `tau setup`)"
+
+// runSetup installs the tau shell hook into the user's shell startup file
+// (~/.bashrc, ~/.zshrc, or ~/.config/fish/config.fish). The shell defaults to
+// the current one ($SHELL) and can be overridden, e.g. `tau setup bash`.
+func runSetup(e *Env, args []string) int {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(e.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	rest := fs.Args()
+
+	var shell string
+	switch len(rest) {
+	case 0:
+		sh := os.Getenv("SHELL")
+		if sh == "" {
+			return fail(e, "$SHELL is not set; pass a shell: tau setup <shell> (bash|zsh|fish)")
+		}
+		shell = filepath.Base(sh)
+	case 1:
+		shell = rest[0]
+	default:
+		return fail(e, "usage: tau setup [shell] (bash|zsh|fish)")
+	}
+	if !shellreg.IsSupported(shell) {
+		return fail(e, "unsupported shell %q (supported: %s)", shell, strings.Join(shellreg.Supported, ", "))
+	}
+
+	rc, err := shellRCPath(shell)
+	if err != nil {
+		return fail(e, "%v", err)
+	}
+
+	existing, _ := os.ReadFile(rc)
+	// Idempotent: skip if a previous `tau setup` already installed the hook.
+	if strings.Contains(string(existing), setupMarker) {
+		fmt.Fprintf(e.Stdout, "tau: shell hook already installed in %s\n", rc)
+		return 0
+	}
+
+	if err := os.MkdirAll(filepath.Dir(rc), 0o755); err != nil {
+		return fail(e, "creating %s: %v", filepath.Dir(rc), err)
+	}
+
+	// Append in place rather than atomically replacing the file: a startup file
+	// is often a symlink managed by a dotfiles tool (chezmoi, stow, bare repo),
+	// and a temp-file rename would detach it from its source and reset its mode.
+	// Appending preserves the inode, symlink target, and permissions.
+	var b strings.Builder
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+	b.WriteString(setupMarker + "\n" + hookInstallLine(shell) + "\n")
+
+	f, err := os.OpenFile(rc, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fail(e, "updating %s: %v", rc, err)
+	}
+	if _, err := f.WriteString(b.String()); err != nil {
+		f.Close()
+		return fail(e, "updating %s: %v", rc, err)
+	}
+	if err := f.Close(); err != nil {
+		return fail(e, "updating %s: %v", rc, err)
+	}
+	fmt.Fprintf(e.Stdout, "tau: installed the %s hook in %s\n", shell, rc)
+	fmt.Fprintf(e.Stdout, "tau: restart your shell or run: source %s\n", rc)
+	return 0
+}
+
+// hookInstallLine is the line that activates the hook at shell startup.
+func hookInstallLine(shell string) string {
+	if shell == shellreg.Fish {
+		return "tau hook fish | source"
+	}
+	return fmt.Sprintf("eval \"$(tau hook %s)\"", shell)
+}
+
+// shellRCPath returns the startup file `tau setup` appends the hook to, honoring
+// ZDOTDIR (zsh) and XDG_CONFIG_HOME (fish).
+func shellRCPath(shell string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	switch shell {
+	case shellreg.Bash:
+		return filepath.Join(home, ".bashrc"), nil
+	case shellreg.Zsh:
+		dir := os.Getenv("ZDOTDIR")
+		if dir == "" {
+			dir = home
+		}
+		return filepath.Join(dir, ".zshrc"), nil
+	case shellreg.Fish:
+		cfg := os.Getenv("XDG_CONFIG_HOME")
+		if cfg == "" {
+			cfg = filepath.Join(home, ".config")
+		}
+		return filepath.Join(cfg, "fish", "config.fish"), nil
+	}
+	return "", fmt.Errorf("no known startup file for shell %q", shell)
+}
+
 // --- activate / deactivate ---
 
 func runActivate(e *Env, args []string) int   { return emitGenScript(e, args, "activate") }

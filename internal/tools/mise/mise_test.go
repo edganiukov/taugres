@@ -248,5 +248,3 @@ func TestInstallNoToolsIsNoop(t *testing.T) {
 		t.Errorf("empty install should be a no-op, got %v err=%v", installed, err)
 	}
 }
-
-
