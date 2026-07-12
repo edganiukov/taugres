@@ -126,7 +126,8 @@ Usage:
   tau clean [--lock|--cache]  remove generated state (.taugres/); --lock also drops .taugres.lock,
                               --cache drops only the sync cache (next sync re-derives, no reinstall)
   tau prune                  remove trust records for projects that no longer exist
-  tau setup [shell]          install the shell hook into your startup file (default: current shell)
+  tau setup [shell] [--yes]  install the shell hook into your startup file (default: current shell);
+                              offers to install mise if it is missing (--yes: install without prompting)
   tau hook <shell>           print the shell hook (bash|zsh|fish)
   tau hook-env <shell>       used by the hook: print env/activation commands for this prompt
   tau activate [shell]       print the activation script for a trusted project (default: current shell)

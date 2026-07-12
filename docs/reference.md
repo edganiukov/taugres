@@ -315,7 +315,8 @@ tau allow                  # trust the active project (once)
 tau deny                   # revoke trust
 tau clean [--lock|--cache] # remove .taugres/; --lock also drops .taugres.lock; --cache drops only the sync cache
 tau prune                  # remove orphaned trust records
-tau setup [shell]          # install the shell hook into your startup file (default: current shell)
+tau setup [shell] [--yes]  # install the shell hook into your startup file (default: current shell);
+                           # offers to install mise if it is missing (--yes installs without prompting)
 tau hook <shell>           # print the shell hook (bash|zsh|fish)
 tau hook-env <shell>       # used by the hook: env/activation commands for this prompt
 tau activate [shell]       # print the activation script for a trusted project (default: $SHELL)
@@ -331,7 +332,15 @@ The easy way — `tau setup` appends the hook to your shell's startup file
 ```sh
 tau setup            # current shell -> ~/.bashrc / ~/.zshrc / config.fish
 tau setup bash       # a specific shell
+tau setup --yes      # also install mise (if missing) without prompting
 ```
+
+If `mise` is not on `PATH`, `tau setup` offers to install it with mise's
+official installer (`curl https://mise.run | sh`), showing the exact command
+first and running it only if you confirm (or pass `--yes`). mise provisions the
+tools tau declares, so without it environments still activate but no tools are
+installed. After installing, ensure mise's bin dir (usually `~/.local/bin`) is
+on `PATH`.
 
 Or install it by hand, once per shell:
 

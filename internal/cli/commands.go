@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -642,16 +644,14 @@ func runHook(e *Env, args []string) int {
 
 // --- setup ---
 
-// setupMarker tags the block `tau setup` adds to a shell's startup file, so a
-// re-run detects it and stays idempotent.
-const setupMarker = "# taugres shell integration (added by `tau setup`)"
-
 // runSetup installs the tau shell hook into the user's shell startup file
 // (~/.bashrc, ~/.zshrc, or ~/.config/fish/config.fish). The shell defaults to
 // the current one ($SHELL) and can be overridden, e.g. `tau setup bash`.
 func runSetup(e *Env, args []string) int {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(e.Stderr)
+	assumeYes := fs.Bool("yes", false, "assume yes to prompts (install mise non-interactively if it is missing)")
+	fs.BoolVar(assumeYes, "y", false, "shorthand for --yes")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -680,41 +680,113 @@ func runSetup(e *Env, args []string) int {
 	}
 
 	existing, _ := os.ReadFile(rc)
-	// Idempotent: skip if a previous `tau setup` already installed the hook.
-	if strings.Contains(string(existing), setupMarker) {
+	// Idempotent: skip the hook append if the hook is already present — whether a previous `tau setup` added it or the
+	// user installed it by hand from the README. Detect the `tau hook <shell>` invocation itself (shared by every form:
+	// `eval "$(tau hook bash)"` and `tau hook fish | source`).
+	if strings.Contains(string(existing), "tau hook "+shell) {
 		fmt.Fprintf(e.Stdout, "tau: shell hook already installed in %s\n", rc)
-		return 0
-	}
+	} else {
+		if err := os.MkdirAll(filepath.Dir(rc), 0o755); err != nil {
+			return fail(e, "creating %s: %v", filepath.Dir(rc), err)
+		}
 
-	if err := os.MkdirAll(filepath.Dir(rc), 0o755); err != nil {
-		return fail(e, "creating %s: %v", filepath.Dir(rc), err)
-	}
-
-	// Append in place rather than atomically replacing the file: a startup file
-	// is often a symlink managed by a dotfiles tool (chezmoi, stow, bare repo),
-	// and a temp-file rename would detach it from its source and reset its mode.
-	// Appending preserves the inode, symlink target, and permissions.
-	var b strings.Builder
-	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		// Append in place rather than atomically replacing the file: a startup file is often a symlink managed by
+		// a dotfiles tool (chezmoi, stow, bare repo), and a temp-file rename would detach it from its source and reset
+		// its mode.  Appending preserves the inode, symlink target, and permissions.
+		var b strings.Builder
+		if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+			b.WriteByte('\n')
+		}
 		b.WriteByte('\n')
-	}
-	b.WriteByte('\n')
-	b.WriteString(setupMarker + "\n" + hookInstallLine(shell) + "\n")
+		b.WriteString("# taugres shell integration (added by `tau setup`)")
+		b.WriteString(hookInstallLine(shell))
+		b.WriteString("\n")
 
-	f, err := os.OpenFile(rc, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fail(e, "updating %s: %v", rc, err)
+		f, err := os.OpenFile(rc, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return fail(e, "updating %s: %v", rc, err)
+		}
+		if _, err := f.WriteString(b.String()); err != nil {
+			f.Close()
+			return fail(e, "updating %s: %v", rc, err)
+		}
+		if err := f.Close(); err != nil {
+			return fail(e, "updating %s: %v", rc, err)
+		}
+		fmt.Fprintf(e.Stdout, "tau: installed the %s hook in %s\n", shell, rc)
+		fmt.Fprintf(e.Stdout, "tau: restart your shell or run: source %s\n", rc)
 	}
-	if _, err := f.WriteString(b.String()); err != nil {
-		f.Close()
-		return fail(e, "updating %s: %v", rc, err)
+
+	// The hook activates environments; mise provisions the tools those
+	// environments put on PATH. Offer to install it when it is missing so a fresh
+	// machine is ready in one command. This never fails setup — the hook is
+	// already in place — so any problem is reported and shrugged off.
+	if !mise.Available() {
+		maybeInstallMise(e, *assumeYes)
 	}
-	if err := f.Close(); err != nil {
-		return fail(e, "updating %s: %v", rc, err)
-	}
-	fmt.Fprintf(e.Stdout, "tau: installed the %s hook in %s\n", shell, rc)
-	fmt.Fprintf(e.Stdout, "tau: restart your shell or run: source %s\n", rc)
 	return 0
+}
+
+// miseInstallCommand is mise's official one-liner installer. It is displayed
+// verbatim before running and is the exact command tau runs, so the user sees
+// precisely what will execute.
+const miseInstallCommand = "curl https://mise.run | sh"
+
+// installMise runs the mise installer, streaming its output to out. It is a
+// variable so tests can stub it instead of hitting the network.
+var installMise = func(ctx context.Context, out io.Writer) error {
+	if _, err := exec.LookPath("curl"); err != nil {
+		return fmt.Errorf("curl is required to install mise but is not on PATH")
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", miseInstallCommand)
+	cmd.Stdout = out
+	cmd.Stderr = out
+	return cmd.Run()
+}
+
+// maybeInstallMise offers to install mise when it is missing from PATH. mise
+// provisions the tools tau declares, so a machine without it can activate
+// environments but not install anything. With assumeYes it installs without
+// prompting (CI/scripts); otherwise it shows the exact command and installs
+// only on an explicit yes. It is best-effort: every failure is reported with
+// the manual command and returns without aborting setup.
+func maybeInstallMise(e *Env, assumeYes bool) {
+	fmt.Fprintln(e.Stdout, "tau: mise is not on PATH — it's needed to install tools.")
+	if !assumeYes {
+		fmt.Fprintf(e.Stdout, "      install it now? this runs:\n        %s\n      [y/N]: ", miseInstallCommand)
+		if !confirmYes(e.Stdin) {
+			fmt.Fprintf(e.Stdout, "tau: skipped; install mise later with:\n        %s\n", miseInstallCommand)
+			return
+		}
+	}
+	if err := installMise(e.ctx(), e.Stderr); err != nil {
+		fmt.Fprintf(e.Stderr, "tau: installing mise failed: %v\n      install it manually: %s\n", err, miseInstallCommand)
+		return
+	}
+	// mise.run installs to ~/.local/bin, which may not be on PATH in this or the
+	// next shell. Re-probe so we tell the user whether it's actually usable yet.
+	if mise.Available() {
+		fmt.Fprintln(e.Stdout, "tau: mise installed.")
+	} else {
+		fmt.Fprintln(e.Stdout, "tau: mise installed, but it is not on your PATH yet —")
+		fmt.Fprintln(e.Stdout, "      restart your shell, or add mise's bin dir (usually ~/.local/bin) to PATH.")
+	}
+}
+
+// confirmYes reads a single line and reports whether it is an affirmative
+// response. A nil reader, EOF, or anything but y/yes is treated as no, so a
+// non-interactive `tau setup` (no stdin) declines rather than hangs.
+func confirmYes(r io.Reader) bool {
+	if r == nil {
+		return false
+	}
+	line, _ := bufio.NewReader(r).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 // hookInstallLine is the line that activates the hook at shell startup.

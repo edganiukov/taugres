@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/edganiukov/taugres/internal/state"
 	"github.com/edganiukov/taugres/internal/testutil"
+	"github.com/edganiukov/taugres/internal/tools/mise"
 )
 
 // run executes a tau command in wd and returns exit code, stdout, stderr.
@@ -103,6 +106,126 @@ func TestSetupPreservesExistingContent(t *testing.T) {
 	}
 	if !strings.Contains(string(rc), `eval "$(tau hook bash)"`) {
 		t.Errorf("setup did not append hook:\n%s", rc)
+	}
+}
+
+// runStdin is run() with a stdin stream, for commands that prompt.
+func runStdin(t *testing.T, wd, stdin string, args ...string) (int, string, string) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	e := &Env{Args: args, Stdin: strings.NewReader(stdin), Stdout: &out, Stderr: &errb, Wd: wd}
+	return Main(e), out.String(), errb.String()
+}
+
+// stubMiseMissing makes mise look absent from PATH and replaces the installer
+// with a stub, returning a pointer set to true if the installer runs. Both are
+// restored on cleanup.
+func stubMiseMissing(t *testing.T) *bool {
+	t.Helper()
+	origBinary, origInstall := mise.Binary, installMise
+	mise.Binary = "tau-mise-does-not-exist"
+	called := false
+	installMise = func(context.Context, io.Writer) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { mise.Binary, installMise = origBinary, origInstall })
+	return &called
+}
+
+func TestSetupInstallsMiseWhenConfirmed(t *testing.T) {
+	called := stubMiseMissing(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/bin/bash")
+
+	code, out, errOut := runStdin(t, home, "y\n", "setup")
+	if code != 0 {
+		t.Fatalf("setup failed: %s", errOut)
+	}
+	if !*called {
+		t.Errorf("installer did not run after confirming; out=%q", out)
+	}
+	// mise.Binary is still bogus, so the post-install PATH warning should show.
+	if !strings.Contains(out, "not on your PATH yet") {
+		t.Errorf("expected post-install PATH warning, got %q", out)
+	}
+}
+
+func TestSetupSkipsMiseWhenDeclined(t *testing.T) {
+	for _, answer := range []string{"n\n", "\n", ""} {
+		called := stubMiseMissing(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SHELL", "/bin/bash")
+
+		_, out, _ := runStdin(t, home, answer, "setup")
+		if *called {
+			t.Errorf("answer %q: installer ran despite declining", answer)
+		}
+		if !strings.Contains(out, "skipped") {
+			t.Errorf("answer %q: expected skip notice, got %q", answer, out)
+		}
+	}
+}
+
+func TestSetupYesFlagInstallsMiseWithoutPrompt(t *testing.T) {
+	called := stubMiseMissing(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/bin/bash")
+
+	// No stdin: --yes must not block on a prompt.
+	code, out, errOut := run(t, home, "setup", "--yes")
+	if code != 0 {
+		t.Fatalf("setup --yes failed: %s", errOut)
+	}
+	if !*called {
+		t.Errorf("installer did not run with --yes; out=%q", out)
+	}
+	if strings.Contains(out, "[y/N]") {
+		t.Errorf("--yes should not prompt, got %q", out)
+	}
+}
+
+func TestSetupSkipsMisePromptWhenPresent(t *testing.T) {
+	origBinary := mise.Binary
+	mise.Binary = "sh" // always on PATH in the test environment
+	t.Cleanup(func() { mise.Binary = origBinary })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/bin/bash")
+
+	_, out, _ := run(t, home, "setup")
+	if strings.Contains(out, "mise is not on PATH") {
+		t.Errorf("should not offer mise when it is present, got %q", out)
+	}
+}
+
+func TestSetupDoesNotDuplicateHandInstalledHook(t *testing.T) {
+	// mise present so the run doesn't detour into the mise prompt.
+	origBinary := mise.Binary
+	mise.Binary = "sh"
+	t.Cleanup(func() { mise.Binary = origBinary })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/bin/bash")
+	// A hook installed by hand from the README, with no `tau setup` marker.
+	handInstalled := "export EXISTING=1\neval \"$(tau hook bash)\"\n"
+	rcPath := filepath.Join(home, ".bashrc")
+	if err := os.WriteFile(rcPath, []byte(handInstalled), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, out, _ := run(t, home, "setup")
+	if !strings.Contains(out, "already installed") {
+		t.Errorf("expected setup to detect the existing hook, got %q", out)
+	}
+	rc, _ := os.ReadFile(rcPath)
+	if n := strings.Count(string(rc), "tau hook bash"); n != 1 {
+		t.Errorf("hook appears %d times, want 1 (no duplicate):\n%s", n, rc)
 	}
 }
 
