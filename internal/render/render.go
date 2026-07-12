@@ -149,7 +149,7 @@ func posixDeactivate(p *model.Plan, shell string) string {
 		definition := guard + "__definition"
 		present := guard + "__set"
 		fmt.Fprintf(w, "if [ \"${%s:-}\" = 1 ]; then\n", guard)
-		fmt.Fprintf(w, "  unset -f %s 2>/dev/null\n", shellQuoteBare(name))
+		fmt.Fprintf(w, "  unset -f %s 2>/dev/null\n", shellQuote(name))
 		fmt.Fprintf(w, "  if [ \"${%s:-}\" = 1 ]; then eval \"${%s}\"; fi\n", present, definition)
 		fmt.Fprintln(w, "fi")
 		fmt.Fprintf(w, "unset %s %s %s\n", guard, definition, present)
@@ -162,7 +162,7 @@ func posixDeactivate(p *model.Plan, shell string) string {
 		definition := guard + "__definition"
 		present := guard + "__set"
 		fmt.Fprintf(w, "if [ \"${%s:-}\" = 1 ]; then\n", guard)
-		fmt.Fprintf(w, "  unalias %s 2>/dev/null\n", shellQuoteBare(name))
+		fmt.Fprintf(w, "  unalias %s 2>/dev/null\n", shellQuote(name))
 		fmt.Fprintf(w, "  if [ \"${%s:-}\" = 1 ]; then eval \"alias ${%s}\"; fi\n", present, definition)
 		fmt.Fprintln(w, "fi")
 		fmt.Fprintf(w, "unset %s %s %s\n", guard, definition, present)
@@ -289,7 +289,7 @@ func renderAliases(w *strings.Builder, p *model.Plan) {
 		guard := helperPrefix + "ALIAS_" + sanitizeVar(name)
 		definition := guard + "__definition"
 		present := guard + "__set"
-		qn := shellQuoteBare(name)
+		qn := shellQuote(name)
 		// Project aliases intentionally win, but save an existing definition once
 		// so deactivation can restore the shell exactly.
 		fmt.Fprintf(w, "if [ -z \"${%s+x}\" ]; then\n", guard)
@@ -322,14 +322,14 @@ func renderFunctions(w *strings.Builder, p *model.Plan, shell string) {
 		definition := guard + "__definition"
 		present := guard + "__set"
 		fmt.Fprintf(w, "if [ -z \"${%s+x}\" ]; then\n", guard)
-		fmt.Fprintf(w, "  if typeset -f %s >/dev/null 2>&1; then\n", shellQuoteBare(name))
-		fmt.Fprintf(w, "    %s=\"$(typeset -f %s)\"\n", definition, shellQuoteBare(name))
+		fmt.Fprintf(w, "  if typeset -f %s >/dev/null 2>&1; then\n", shellQuote(name))
+		fmt.Fprintf(w, "    %s=\"$(typeset -f %s)\"\n", definition, shellQuote(name))
 		fmt.Fprintf(w, "    %s=1\n", present)
 		fmt.Fprintln(w, "  else")
 		fmt.Fprintf(w, "    %s=0\n", present)
 		fmt.Fprintln(w, "  fi")
 		fmt.Fprintln(w, "fi")
-		fmt.Fprintf(w, "unset -f %s 2>/dev/null\n", shellQuoteBare(name))
+		fmt.Fprintf(w, "unset -f %s 2>/dev/null\n", shellQuote(name))
 		if e.File != "" {
 			// Body lives in a file, sourced with the caller's arguments.
 			fmt.Fprintf(w, "%s() { source %s \"$@\"; }\n", name, shellQuote(e.File))
@@ -438,15 +438,11 @@ func sortedKeys(m map[string]string) []string {
 	return out
 }
 
-// shellQuote returns a single-quoted shell literal safe for bash/zsh.
+// shellQuote returns a single-quoted shell literal safe for bash/zsh. It is used
+// both for values and for command words (alias/function names); names are
+// validated to a safe charset, so quoting them is belt-and-suspenders.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// shellQuoteBare quotes a name for use as a command word (alias/function name).
-// Names are validated to a safe charset, so this is mostly a passthrough.
-func shellQuoteBare(s string) string {
-	return shellQuote(s)
 }
 
 // sanitizeVar hex-encodes a name into a collision-free shell variable suffix.

@@ -369,7 +369,7 @@ func runExec(e *Env, args []string) int {
 	// pip/uv/npm bin dirs are already deterministic in plan.PathPrepend.
 	var miseBinDirs []string
 	if m, lerr := state.Load(stateDir); lerr == nil {
-		miseBinDirs = miseBinDirsFrom(m, plan)
+		miseBinDirs = miseBinDirsFrom(m)
 	}
 
 	envMap := environment.Build(plan, miseBinDirs)

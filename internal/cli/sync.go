@@ -240,7 +240,7 @@ func syncProject(e *Env, opts syncOptions) int {
 		// dirs by dropping the package bin dirs, which are deterministic from the
 		// plan — so no dir is cached twice.
 		toolDirs = prior.ToolDirs
-		miseBinDirs = miseBinDirsFrom(prior, plan)
+		miseBinDirs = miseBinDirsFrom(prior)
 	} else {
 		miseBinDirs, toolDirs, failedManagers = installTools(ctx, plan, lk, rep, opts.update, opts.forced, addErr, fresh)
 		// A targeted update is transactional per manager: if resolution/install
@@ -467,34 +467,14 @@ func managerToolDirs(plan *model.Plan, miseDirs []string) map[string][]string {
 	return dirs
 }
 
-// miseBinDirsFrom reads explicit ownership from new manifests and falls back to
-// subtracting deterministic package dirs for legacy manifests.
-func miseBinDirsFrom(manifest *state.Manifest, plan *model.Plan) []string {
-	if dirs, ok := manifest.ManagerDirs[toolmgr.Mise]; ok {
-		return append([]string(nil), dirs...)
-	}
-	pkg := map[string]bool{}
-	for _, dir := range packageBinDirs(plan) {
-		pkg[dir] = true
-	}
-	var out []string
-	for _, dir := range manifest.ToolDirs {
-		if !pkg[dir] {
-			out = append(out, dir)
-		}
-	}
-	return out
-}
-
-// allExist reports whether every path is an existing directory. It gates the
-// install-skipping fast path: a wiped .taugres/tools forces a full reinstall.
-func allExist(dirs []string) bool {
-	for _, d := range dirs {
-		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
-			return false
-		}
-	}
-	return true
+// miseBinDirsFrom reads the mise store bin dirs recorded under explicit
+// ownership. Only current-build manifests reach here: the sync fast path
+// discards a foreign-build prior (see the TauBuild check in syncProject), and
+// the exec path force-resyncs first (NeedsSync treats a build-stamp mismatch as
+// stale). Every current-build manifest records ManagerDirs, so no legacy
+// ToolDirs-subtraction fallback is needed.
+func miseBinDirsFrom(manifest *state.Manifest) []string {
+	return append([]string(nil), manifest.ManagerDirs[toolmgr.Mise]...)
 }
 
 // toolSigs fingerprints each tool manager's install-relevant state: its declared
@@ -564,7 +544,7 @@ func freshness(prior *state.Manifest, cur map[string]string, plan *model.Plan, u
 	pending := map[string]bool{}
 	if prior != nil {
 		priorSig = prior.ToolSig
-		miseDirs = miseBinDirsFrom(prior, plan)
+		miseDirs = miseBinDirsFrom(prior)
 		for _, manager := range prior.PendingManagers {
 			pending[manager] = true
 		}
@@ -583,7 +563,7 @@ func freshness(prior *state.Manifest, cur map[string]string, plan *model.Plan, u
 		if !declared {
 			return false
 		}
-		return update || forced[mgr] || cur[mgr] != priorSig[mgr] || !allExist(dirs)
+		return update || forced[mgr] || cur[mgr] != priorSig[mgr] || state.MissingDir(dirs) != ""
 	}
 	result := toolFreshness{stale: map[string]bool{}, miseDirs: miseDirs}
 	result.stale[toolmgr.Mise] = stale(toolmgr.Mise, len(plan.MiseTools) > 0, miseDirs)

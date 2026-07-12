@@ -425,8 +425,8 @@ func HashFile(path string) (string, error) {
 }
 
 // --- staleness ---
-// missingDir returns the first directory in dirs that no longer exists, or "".
-func missingDir(dirs []string) string {
+// MissingDir returns the first directory in dirs that no longer exists, or "".
+func MissingDir(dirs []string) string {
 	for _, d := range dirs {
 		if info, err := os.Stat(d); err != nil || !info.IsDir() {
 			return d
@@ -516,7 +516,7 @@ func needsSyncLoaded(manifestInfo os.FileInfo, manifest *Manifest, configPath st
 	if inputsChanged(inputs, manifest.InputMetadata, manifestInfo.ModTime().UnixNano()) {
 		return true
 	}
-	if missingDir(manifest.ToolDirs) != "" {
+	if MissingDir(manifest.ToolDirs) != "" {
 		return true
 	}
 	if probesChanged(manifest.Probes) {
@@ -622,7 +622,7 @@ func CheckStale(stateDir string, expectedShells []string) StaleReason {
 	}
 
 	// Tool directories (mise store bins, pip/uv venv, npm prefix) must exist.
-	if d := missingDir(m.ToolDirs); d != "" {
+	if d := MissingDir(m.ToolDirs); d != "" {
 		return StaleReason{Stale: true, Reason: "tool directory " + d + " is missing; run `tau sync`"}
 	}
 
