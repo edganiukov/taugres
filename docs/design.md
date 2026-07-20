@@ -2,8 +2,8 @@
 
 This document describes the design of Taugres as built — the *why* behind it.
 For the config/syntax/CLI **reference** (the Starlark API, path rules, built-in
-variables, and commands), see [reference.md](reference.md). `taugres`/Taugres is
-a working project name; the CLI binary is `tau`.
+variables, and commands), see [manual.md](manual.md).
+`taugres`/Taugres is a working project name; the CLI binary is `tau`.
 
 ## What it is
 
@@ -76,7 +76,7 @@ its own approval.
 
 Config file names are fixed (`workspace.tg`, `project.tg`, and `load(...)`-only
 helper modules); a directory must not contain both `workspace.tg` and
-`project.tg`. See [reference.md](reference.md#config-files) for the rules.
+`project.tg`. See [manual.md](manual.md#31-config-files-and-discovery) for the rules.
 
 ## Core model
 
@@ -119,7 +119,7 @@ be branched on at eval — that's what the probes are for.
 All shell-facing configuration is grouped under the `shell` namespace; external
 tool managers keep their own namespaces. The full API surface, path-anchoring
 rules, reusable-helper pattern, and the built-in `TAUGRES_*` variables live in
-[reference.md](reference.md#configuration-api).
+[manual.md](manual.md#4-configuration-reference).
 
 Two decisions worth calling out here. There is intentionally **no `bin()`
 builtin and no automatic `bin/`**: project commands are exposed explicitly with
@@ -131,7 +131,7 @@ declaration order, inside the trust gate; they are not undone on deactivation
 Config must not depend on the process cwd, so path arguments are root-anchored
 (`//…`) or absolute and bare/relative paths are rejected; `load(...)` also
 accepts relative imports against the importing file. Remote (`https://`) imports
-are not supported yet (see [reference.md](reference.md#path-anchoring-and-imports)
+are not supported yet (see [manual.md](manual.md#34-paths-anchoring-and-imports)
 and Deferred).
 
 ## Activation / deactivation
@@ -168,7 +168,7 @@ command and propagates its exit code.
 
 ## Shell hook
 
-Install once per shell (see [reference.md](reference.md#installing-the-shell-hook)
+Install once per shell (see [manual.md](manual.md#22-the-shell-hook)
 for the exact snippets).
 
 Wiring: zsh uses `precmd`; fish uses the `fish_prompt` event; bash has no native

@@ -50,9 +50,8 @@ uv.install(["ruff", "rich"])
 
 ## Docs
 
-- **[Getting started](docs/getting-started.md)** — the shell hook & auto-sync,
-  trust, the full config API, tools/packages (mise/pip/uv/npm + mise backends),
-  the lockfile, commands, performance, and root-anchored paths.
-- **[Reference](docs/reference.md)** — config files, the Starlark API, path
-  rules, built-in variables, and commands.
+- **[Manual](docs/manual.md)** — the full guide and reference:
+  the shell hook & auto-sync, trust, config files & discovery, the Starlark API,
+  tools/packages (mise/pip/uv/npm + mise backends), the lockfile, built-in
+  variables, commands, and performance.
 - **[Design](docs/design.md)** — architecture and rationale.
